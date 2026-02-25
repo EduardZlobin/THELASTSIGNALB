@@ -32,6 +32,18 @@ async function getMessage(threadId, messageId) {
   return api(`/channels/${threadId}/messages/${messageId}`);
 }
 
+async function getActiveThreads(channelId) {
+  return api(`/channels/${channelId}/threads/active`);
+}
+
+async function getAllThreads(channelId) {
+  const active = await getActiveThreads(channelId);
+  const archived = await getArchivedPublicThreads(channelId);
+  return {
+    threads: [...(active?.threads || []), ...(archived?.threads || [])],
+  };
+}
+
 function extractText(m) {
   const parts = [];
 
@@ -68,7 +80,6 @@ function extractImages(m) {
     if (e?.thumbnail?.url) urls.push(e.thumbnail.url);
   }
 
-  // уникализируем
   return [...new Set(urls)];
 }
 
@@ -84,13 +95,12 @@ function toISO(ts) {
 }
 
 async function main() {
-  const archived = await getArchivedPublicThreads(FORUM_CHANNEL_ID, 50);
-  const threads = archived?.threads || [];
+  const all = await getAllThreads(FORUM_CHANNEL_ID);
+  const threads = all?.threads || [];
 
   const posts = [];
 
   for (const th of threads) {
-    // 1) Самый надежный способ: message_id стартового сообщения
     let starter = null;
     if (th.message_id) {
       try {
@@ -100,18 +110,15 @@ async function main() {
       }
     }
 
-    // 2) Фоллбек: берём пачку сообщений и пытаемся найти самое раннее
     const msgs = await getMessages(th.id, 100);
     if (!Array.isArray(msgs) || !msgs.length) continue;
 
     if (!starter) {
-      // Discord отдаёт новые -> старые, берём самое старое из этой пачки
       starter = msgs[msgs.length - 1];
     }
 
     const a = normAuthor(starter?.author);
 
-    // Комментарии = все, кроме стартового
     const comments = msgs
       .filter((m) => starter && m.id !== starter.id)
       .slice(0, 80)
@@ -122,8 +129,8 @@ async function main() {
           author: au.name,
           author_tag: au.tag,
           created_at: toISO(m.timestamp),
-          content: m.content || "",
-          images: (m.attachments || []).map((x) => x.url),
+          content: extractText(m),
+          images: extractImages(m),
         };
       })
       .reverse();
@@ -132,8 +139,8 @@ async function main() {
       id: th.id,
       title: th.name,
 
-      content: starter?.content || "",
-      images: (starter?.attachments || []).map((x) => x.url),
+      content: extractText(starter),
+      images: extractImages(starter),
 
       created_at: toISO(starter?.timestamp) || toISO(th.created_at),
 
@@ -162,4 +169,3 @@ main().catch((e) => {
   console.error(e);
   process.exit(1);
 });
-

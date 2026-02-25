@@ -1,8 +1,10 @@
 import fs from "fs";
 
-const DISCORD_TOKEN = process.env.DISCORD_TOKEN;            // секрет!
-const FORUM_CHANNEL_ID = process.env.FORUM_CHANNEL_ID;      // "1259105..."
+const DISCORD_TOKEN = process.env.DISCORD_TOKEN;
+const FORUM_CHANNEL_ID = process.env.FORUM_CHANNEL_ID;
+
 const OUT_FILE = "posts.json";
+const CHANNEL_NAME = "🅲🅽🅽-breaking-bad-news📰";
 
 if (!DISCORD_TOKEN || !FORUM_CHANNEL_ID) {
   console.error("Missing DISCORD_TOKEN or FORUM_CHANNEL_ID");
@@ -19,16 +21,31 @@ async function api(path) {
 }
 
 async function getArchivedPublicThreads(channelId, limit = 50) {
+  // для форумов обычно хватает этого
   return api(`/channels/${channelId}/threads/archived/public?limit=${limit}`);
 }
 
-async function getMessages(channelId, limit = 50) {
-  return api(`/channels/${channelId}/messages?limit=${limit}`);
+async function getThreadMessages(threadId, limit = 100) {
+  return api(`/channels/${threadId}/messages?limit=${limit}`);
 }
 
-function normalize(posts) {
-  posts.sort((a, b) => (b.created_at || "").localeCompare(a.created_at || ""));
-  return posts;
+function normAuthor(a) {
+  if (!a) return { name: "unknown", tag: "unknown" };
+  const disc = a.discriminator && a.discriminator !== "0" ? `#${a.discriminator}` : "";
+  return { name: a.username || "unknown", tag: `${a.username || "unknown"}${disc}` };
+}
+
+function pickStarterMessage(messages, threadId) {
+  // Лучший вариант: starter message имеет id == threadId (часто так)
+  const byId = messages.find(m => m.id === threadId);
+  if (byId) return byId;
+
+  // Иначе берём самый старый из пачки
+  return messages[messages.length - 1] || null;
+}
+
+function toISO(ts) {
+  try { return ts ? new Date(ts).toISOString() : null; } catch { return null; }
 }
 
 async function main() {
@@ -38,32 +55,63 @@ async function main() {
   const posts = [];
 
   for (const th of threads) {
-    // Берём первые сообщения темы (в ответе messages обычно идут от новых к старым)
-    const msgs = await getMessages(th.id, 50);
-    const starter = msgs[msgs.length - 1]; // самый старый в пачке
+    const msgs = await getThreadMessages(th.id, 100);
+    if (!Array.isArray(msgs) || !msgs.length) continue;
 
+    // В API сообщения приходят от новых к старым
+    const starter = pickStarterMessage(msgs, th.id);
     if (!starter) continue;
+
+    const a = normAuthor(starter.author);
+
+    // Комментарии = все остальные сообщения, кроме стартового
+    const comments = msgs
+      .filter(m => m.id !== starter.id)
+      .slice(0, 50) // ограничим, чтобы json не раздувался
+      .map(m => {
+        const au = normAuthor(m.author);
+        return {
+          id: m.id,
+          author: au.name,
+          author_tag: au.tag,
+          created_at: toISO(m.timestamp),
+          content: m.content || "",
+          images: (m.attachments || []).map(x => x.url),
+        };
+      })
+      .reverse(); // чтобы шли от старых к новым
 
     posts.push({
       id: th.id,
       title: th.name,
-      content: starter.content || "",
-      created_at: starter.timestamp || th.created_at || null,
 
-      channel_id: FORUM_CHANNEL_ID,
-      channel_name: "DISCORD FORUM",
+      // ✅ вот он текст поста
+      content: starter.content || "",
+
+      // ✅ вот они изображения из первого сообщения
+      images: (starter.attachments || []).map(x => x.url),
+
+      created_at: toISO(starter.timestamp) || toISO(th.created_at),
+
+      channel_id: String(FORUM_CHANNEL_ID),
+      channel_name: CHANNEL_NAME,
       channel_verified: true,
       channel_avatar: null,
 
-      author: starter.author?.username ? `${starter.author.username}` : "BOT",
-      images: (starter.attachments || []).map(a => a.url),
+      author: a.name,
+      author_tag: a.tag,
+
+      // ✅ ссылка на источник (тема)
       url: th.guild_id ? `https://discord.com/channels/${th.guild_id}/${th.id}` : null,
+
+      // ✅ комментарии (чтение)
+      comments,
     });
   }
 
-  const out = normalize(posts);
-  fs.writeFileSync(OUT_FILE, JSON.stringify(out, null, 2), "utf8");
-  console.log(`Wrote ${OUT_FILE}: ${out.length} posts`);
+  posts.sort((a, b) => (b.created_at || "").localeCompare(a.created_at || ""));
+  fs.writeFileSync(OUT_FILE, JSON.stringify(posts, null, 2), "utf8");
+  console.log(`Wrote ${OUT_FILE}: ${posts.length} posts`);
 }
 
 main().catch((e) => {

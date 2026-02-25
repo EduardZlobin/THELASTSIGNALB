@@ -1,5 +1,11 @@
 import fs from "fs";
 
+const GUILD_ID = process.env.GUILD_ID;
+if (!GUILD_ID) {
+  console.error("Missing GUILD_ID (add it as GitHub Actions secret)");
+  process.exit(1);
+}
+
 const DISCORD_TOKEN = process.env.DISCORD_TOKEN;
 const FORUM_CHANNEL_ID = process.env.FORUM_CHANNEL_ID;
 
@@ -34,8 +40,12 @@ async function api(path, init = {}) {
   return text ? JSON.parse(text) : null;
 }
 
-async function getActiveThreads(channelId) {
-  return api(`/channels/${channelId}/threads/active`);
+/**
+ * ✅ ПРАВИЛЬНОЕ получение активных тредов:
+ * /guilds/{guild_id}/threads/active
+ */
+async function getActiveThreadsFromGuild(guildId) {
+  return api(`/guilds/${guildId}/threads/active`);
 }
 
 async function getArchivedPublicThreadsPage(channelId, limit = 100, before = null) {
@@ -131,9 +141,6 @@ async function fetchArchivedThreadsAll(channelId, maxTotal) {
 
     out.push(...threads);
 
-    // пагинация: "before" = archive_timestamp последнего треда страницы
-    // Discord возвращает threads + has_more + иногда thread_metadata.archive_timestamp
-    // Берём минимальный archive_timestamp в странице (последний тред)
     const last = threads[threads.length - 1];
     const ts = last?.thread_metadata?.archive_timestamp;
     if (!page?.has_more || !ts) break;
@@ -145,16 +152,19 @@ async function fetchArchivedThreadsAll(channelId, maxTotal) {
 }
 
 async function main() {
-  // 1) active threads
+  // 1) active threads (из всего сервера) -> фильтруем только наш форум по parent_id
   let activeThreads = [];
   try {
-    const active = await getActiveThreads(FORUM_CHANNEL_ID);
-    activeThreads = active?.threads || [];
+    const active = await getActiveThreadsFromGuild(GUILD_ID);
+    const allActive = active?.threads || [];
+    activeThreads = allActive.filter(
+      (t) => String(t.parent_id) === String(FORUM_CHANNEL_ID)
+    );
   } catch (e) {
     console.warn("getActiveThreads failed:", e?.message || e);
   }
 
-  // 2) archived threads with pagination
+  // 2) archived threads with pagination (для нашего форума)
   let archivedThreads = [];
   try {
     archivedThreads = await fetchArchivedThreadsAll(FORUM_CHANNEL_ID, MAX_ARCHIVED);
@@ -165,23 +175,19 @@ async function main() {
   console.log("ACTIVE THREADS:", activeThreads.length);
   console.log("ARCHIVED THREADS:", archivedThreads.length);
 
-  // merged
   const threads = uniqById([...activeThreads, ...archivedThreads]).slice(0, MAX_THREADS_TOTAL);
 
-  // Если тут мало — значит реально API не отдаёт новые треды
   console.log("MERGED THREADS (capped):", threads.length);
   console.log("TOP 5 THREAD TITLES:", threads.slice(0, 5).map(t => t.name).join(" | "));
 
   const posts = [];
 
   for (const th of threads) {
-    // даже если контент не получится — тему не выкидываем
     await joinThread(th.id);
 
     let starter = null;
     let msgList = [];
 
-    // starter
     if (th.message_id) {
       try {
         starter = await getMessage(th.id, th.message_id);
@@ -190,7 +196,6 @@ async function main() {
       }
     }
 
-    // messages/comments
     try {
       const msgs = await getMessages(th.id, 100);
       msgList = Array.isArray(msgs) ? msgs : [];
@@ -198,7 +203,6 @@ async function main() {
       console.warn("messages fetch failed:", th.id, e?.message || e);
     }
 
-    // fallback starter: oldest message we have
     if (!starter && msgList.length) starter = msgList[msgList.length - 1];
 
     const a = normAuthor(starter?.author);
@@ -229,7 +233,6 @@ async function main() {
       content,
       images,
 
-      // если starter не доступен — хотя бы время треда
       created_at: toISO(starter?.timestamp) || toISO(th.created_at),
 
       channel_id: String(FORUM_CHANNEL_ID),

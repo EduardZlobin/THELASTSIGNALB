@@ -24,6 +24,7 @@ jobs:
         env:
           DISCORD_TOKEN: ${{ secrets.DISCORD_TOKEN }}
           FORUM_CHANNEL_ID: ${{ secrets.FORUM_CHANNEL_ID }}
+          GUILD_ID: ${{ secrets.GUILD_ID }}
         run: |
           node scripts/sync.mjs
 

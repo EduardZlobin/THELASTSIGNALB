@@ -2607,3 +2607,7 @@ body::before {
   cursor: zoom-in;
 }
 .comments.hidden { display: none; }
+
+.post-image.expanded { transform: scale(1.02); cursor: zoom-out; }
+.post-image { cursor: zoom-in; }
+.comments.hidden { display: none; }

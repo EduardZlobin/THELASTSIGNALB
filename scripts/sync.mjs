@@ -21,7 +21,6 @@ async function api(path) {
 }
 
 async function getArchivedPublicThreads(channelId, limit = 50) {
-  // для форумов обычно хватает этого
   return api(`/channels/${channelId}/threads/archived/public?limit=${limit}`);
 }
 
@@ -31,21 +30,26 @@ async function getThreadMessages(threadId, limit = 100) {
 
 function normAuthor(a) {
   if (!a) return { name: "unknown", tag: "unknown" };
-  const disc = a.discriminator && a.discriminator !== "0" ? `#${a.discriminator}` : "";
+  const disc =
+    a.discriminator && a.discriminator !== "0" ? `#${a.discriminator}` : "";
   return { name: a.username || "unknown", tag: `${a.username || "unknown"}${disc}` };
 }
 
 function pickStarterMessage(messages, threadId) {
-  // Лучший вариант: starter message имеет id == threadId (часто так)
-  const byId = messages.find(m => m.id === threadId);
+  // Часто starter message id == thread id
+  const byId = messages.find((m) => m.id === threadId);
   if (byId) return byId;
 
-  // Иначе берём самый старый из пачки
+  // иначе самый старый из пачки
   return messages[messages.length - 1] || null;
 }
 
 function toISO(ts) {
-  try { return ts ? new Date(ts).toISOString() : null; } catch { return null; }
+  try {
+    return ts ? new Date(ts).toISOString() : null;
+  } catch {
+    return null;
+  }
 }
 
 async function main() {
@@ -58,17 +62,17 @@ async function main() {
     const msgs = await getThreadMessages(th.id, 100);
     if (!Array.isArray(msgs) || !msgs.length) continue;
 
-    // В API сообщения приходят от новых к старым
+    // Discord отдаёт сообщения от новых к старым
     const starter = pickStarterMessage(msgs, th.id);
     if (!starter) continue;
 
     const a = normAuthor(starter.author);
 
-    // Комментарии = все остальные сообщения, кроме стартового
+    // Комментарии = все остальные сообщения
     const comments = msgs
-      .filter(m => m.id !== starter.id)
-      .slice(0, 50) // ограничим, чтобы json не раздувался
-      .map(m => {
+      .filter((m) => m.id !== starter.id)
+      .slice(0, 80)
+      .map((m) => {
         const au = normAuthor(m.author);
         return {
           id: m.id,
@@ -76,7 +80,7 @@ async function main() {
           author_tag: au.tag,
           created_at: toISO(m.timestamp),
           content: m.content || "",
-          images: (m.attachments || []).map(x => x.url),
+          images: (m.attachments || []).map((x) => x.url),
         };
       })
       .reverse(); // чтобы шли от старых к новым
@@ -85,11 +89,11 @@ async function main() {
       id: th.id,
       title: th.name,
 
-      // ✅ вот он текст поста
+      // ✅ описание поста (первое сообщение в теме)
       content: starter.content || "",
 
-      // ✅ вот они изображения из первого сообщения
-      images: (starter.attachments || []).map(x => x.url),
+      // ✅ картинки в первом сообщении
+      images: (starter.attachments || []).map((x) => x.url),
 
       created_at: toISO(starter.timestamp) || toISO(th.created_at),
 
@@ -101,8 +105,10 @@ async function main() {
       author: a.name,
       author_tag: a.tag,
 
-      // ✅ ссылка на источник (тема)
-      url: th.guild_id ? `https://discord.com/channels/${th.guild_id}/${th.id}` : null,
+      // ✅ ссылка на тему
+      url: th.guild_id
+        ? `https://discord.com/channels/${th.guild_id}/${th.id}`
+        : null,
 
       // ✅ комментарии (чтение)
       comments,

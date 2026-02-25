@@ -32,6 +32,46 @@ async function getMessage(threadId, messageId) {
   return api(`/channels/${threadId}/messages/${messageId}`);
 }
 
+function extractText(m) {
+  const parts = [];
+
+  const content = (m?.content || "").trim();
+  if (content) parts.push(content);
+
+  const embeds = Array.isArray(m?.embeds) ? m.embeds : [];
+  for (const e of embeds) {
+    if (e?.title) parts.push(String(e.title).trim());
+    if (e?.description) parts.push(String(e.description).trim());
+
+    const fields = Array.isArray(e?.fields) ? e.fields : [];
+    for (const f of fields) {
+      const name = (f?.name || "").trim();
+      const value = (f?.value || "").trim();
+      if (name && value) parts.push(`${name}: ${value}`);
+      else if (name) parts.push(name);
+      else if (value) parts.push(value);
+    }
+  }
+
+  return parts.filter(Boolean).join("\n\n").trim();
+}
+
+function extractImages(m) {
+  const urls = [];
+
+  const atts = Array.isArray(m?.attachments) ? m.attachments : [];
+  for (const a of atts) if (a?.url) urls.push(a.url);
+
+  const embeds = Array.isArray(m?.embeds) ? m.embeds : [];
+  for (const e of embeds) {
+    if (e?.image?.url) urls.push(e.image.url);
+    if (e?.thumbnail?.url) urls.push(e.thumbnail.url);
+  }
+
+  // уникализируем
+  return [...new Set(urls)];
+}
+
 function normAuthor(a) {
   if (!a) return { name: "unknown", tag: "unknown" };
   const disc =
@@ -122,3 +162,4 @@ main().catch((e) => {
   console.error(e);
   process.exit(1);
 });
+

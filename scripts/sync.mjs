@@ -269,3 +269,6 @@ main().catch((e) => {
   console.error(e);
   process.exit(1);
 });
+
+console.log("ENV HAS GUILD_ID:", Boolean(process.env.GUILD_ID));
+console.log("ENV KEYS:", Object.keys(process.env).filter(k => k.includes("GUILD")).join(", "));

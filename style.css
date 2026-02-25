@@ -2598,3 +2598,12 @@ body::before {
 .main-content {
     min-width: 0; 
 }
+
+.post-image.expanded {
+  transform: scale(1.02);
+  cursor: zoom-out;
+}
+.post-image {
+  cursor: zoom-in;
+}
+.comments.hidden { display: none; }

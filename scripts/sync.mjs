@@ -6,6 +6,13 @@ const FORUM_CHANNEL_ID = process.env.FORUM_CHANNEL_ID;
 const OUT_FILE = "posts.json";
 const CHANNEL_NAME = "🅲🅽🅽-breaking-bad-news📰";
 
+// сколько тредов хотим максимум в json
+const MAX_THREADS_TOTAL = Number(process.env.MAX_THREADS_TOTAL || 500);
+// сколько архива тянуть (active + archived суммарно обрежется MAX_THREADS_TOTAL)
+const MAX_ARCHIVED = Number(process.env.MAX_ARCHIVED || 500);
+// лимит одной страницы архива (у Discord обычно max 100)
+const ARCHIVE_PAGE_LIMIT = 100;
+
 if (!DISCORD_TOKEN || !FORUM_CHANNEL_ID) {
   console.error("Missing DISCORD_TOKEN or FORUM_CHANNEL_ID");
   process.exit(1);
@@ -20,7 +27,6 @@ async function api(path, init = {}) {
     },
   });
 
-  // 204 (No Content) — нормальный ответ для joinThread
   if (res.status === 204) return null;
 
   const text = await res.text().catch(() => "");
@@ -32,13 +38,21 @@ async function getActiveThreads(channelId) {
   return api(`/channels/${channelId}/threads/active`);
 }
 
-async function getArchivedPublicThreads(channelId, limit = 500) {
-  return api(`/channels/${channelId}/threads/archived/public?limit=${limit}`);
+async function getArchivedPublicThreadsPage(channelId, limit = 100, before = null) {
+  const qs = new URLSearchParams();
+  qs.set("limit", String(limit));
+  if (before) qs.set("before", before);
+  return api(`/channels/${channelId}/threads/archived/public?${qs.toString()}`);
 }
 
 async function joinThread(threadId) {
-  // Добавляет бота в тред
-  await api(`/channels/${threadId}/thread-members/@me`, { method: "PUT" });
+  // Иногда без join чтение сообщений возвращает пусто
+  try {
+    await api(`/channels/${threadId}/thread-members/@me`, { method: "PUT" });
+  } catch (e) {
+    // не фейлим синк из-за join
+    console.warn("joinThread failed:", threadId, e?.message || e);
+  }
 }
 
 async function getMessages(threadId, limit = 100) {
@@ -59,12 +73,8 @@ function toISO(ts) {
 
 function normAuthor(a) {
   if (!a) return { name: "unknown", tag: "unknown" };
-  const disc =
-    a.discriminator && a.discriminator !== "0" ? `#${a.discriminator}` : "";
-  return {
-    name: a.username || "unknown",
-    tag: `${a.username || "unknown"}${disc}`,
-  };
+  const disc = a.discriminator && a.discriminator !== "0" ? `#${a.discriminator}` : "";
+  return { name: a.username || "unknown", tag: `${a.username || "unknown"}${disc}` };
 }
 
 function extractText(m) {
@@ -76,7 +86,6 @@ function extractText(m) {
   for (const e of embeds) {
     if (e?.title) parts.push(String(e.title).trim());
     if (e?.description) parts.push(String(e.description).trim());
-
     const fields = Array.isArray(e?.fields) ? e.fields : [];
     for (const f of fields) {
       const name = (f?.name || "").trim();
@@ -105,86 +114,98 @@ function extractImages(m) {
   return [...new Set(urls)];
 }
 
-function uniqThreads(list) {
+function uniqById(list) {
   const map = new Map();
-  for (const t of list) map.set(t.id, t);
+  for (const x of list) map.set(x.id, x);
   return [...map.values()];
 }
 
-async function safeJoin(threadId) {
-  try {
-    await joinThread(threadId);
-    return true;
-  } catch (e) {
-    // Частые причины: archived/locked, нет прав, rate limit (редко)
-    console.warn("Could not join thread:", threadId, e?.message || e);
-    return false;
+async function fetchArchivedThreadsAll(channelId, maxTotal) {
+  const out = [];
+  let before = null;
+
+  while (out.length < maxTotal) {
+    const page = await getArchivedPublicThreadsPage(channelId, ARCHIVE_PAGE_LIMIT, before);
+    const threads = page?.threads || [];
+    if (!threads.length) break;
+
+    out.push(...threads);
+
+    // пагинация: "before" = archive_timestamp последнего треда страницы
+    // Discord возвращает threads + has_more + иногда thread_metadata.archive_timestamp
+    // Берём минимальный archive_timestamp в странице (последний тред)
+    const last = threads[threads.length - 1];
+    const ts = last?.thread_metadata?.archive_timestamp;
+    if (!page?.has_more || !ts) break;
+
+    before = ts;
   }
+
+  return out.slice(0, maxTotal);
 }
 
 async function main() {
-  const active = await getActiveThreads(FORUM_CHANNEL_ID).catch((e) => {
-    console.warn("Active threads fetch failed:", e?.message || e);
-    return { threads: [] };
-  });
+  // 1) active threads
+  let activeThreads = [];
+  try {
+    const active = await getActiveThreads(FORUM_CHANNEL_ID);
+    activeThreads = active?.threads || [];
+  } catch (e) {
+    console.warn("getActiveThreads failed:", e?.message || e);
+  }
 
-  const archived = await getArchivedPublicThreads(FORUM_CHANNEL_ID, 50).catch(
-    (e) => {
-      console.warn("Archived threads fetch failed:", e?.message || e);
-      return { threads: [] };
-    }
-  );
+  // 2) archived threads with pagination
+  let archivedThreads = [];
+  try {
+    archivedThreads = await fetchArchivedThreadsAll(FORUM_CHANNEL_ID, MAX_ARCHIVED);
+  } catch (e) {
+    console.warn("fetchArchivedThreadsAll failed:", e?.message || e);
+  }
 
-  const threads = uniqThreads([
-    ...(active?.threads || []),
-    ...(archived?.threads || []),
-  ]);
+  console.log("ACTIVE THREADS:", activeThreads.length);
+  console.log("ARCHIVED THREADS:", archivedThreads.length);
+
+  // merged
+  const threads = uniqById([...activeThreads, ...archivedThreads]).slice(0, MAX_THREADS_TOTAL);
+
+  // Если тут мало — значит реально API не отдаёт новые треды
+  console.log("MERGED THREADS (capped):", threads.length);
+  console.log("TOP 5 THREAD TITLES:", threads.slice(0, 5).map(t => t.name).join(" | "));
 
   const posts = [];
 
   for (const th of threads) {
-    // 0) join чтобы читать сообщения
-    await safeJoin(th.id);
+    // даже если контент не получится — тему не выкидываем
+    await joinThread(th.id);
 
-    // 1) starter message (главный пост)
     let starter = null;
+    let msgList = [];
 
+    // starter
     if (th.message_id) {
       try {
         starter = await getMessage(th.id, th.message_id);
       } catch (e) {
-        console.warn(
-          "Starter fetch by message_id failed for",
-          th.id,
-          e?.message || e
-        );
+        console.warn("starter fetch failed:", th.id, e?.message || e);
       }
     }
 
-    // 2) ответы/комменты
-    let msgList = [];
+    // messages/comments
     try {
       const msgs = await getMessages(th.id, 100);
       msgList = Array.isArray(msgs) ? msgs : [];
     } catch (e) {
-      console.warn("Messages fetch failed for", th.id, e?.message || e);
+      console.warn("messages fetch failed:", th.id, e?.message || e);
     }
 
-    // fallback: если starter не получили — возьмём самое старое из msgList
-    if (!starter && msgList.length) {
-      starter = msgList[msgList.length - 1];
-    }
-
-    if (!starter && !msgList.length) {
-      // нечего сохранять
-      continue;
-    }
+    // fallback starter: oldest message we have
+    if (!starter && msgList.length) starter = msgList[msgList.length - 1];
 
     const a = normAuthor(starter?.author);
 
     const comments = msgList
-      .filter((m) => starter && m.id !== starter.id)
-      .map((m) => {
+      .filter(m => starter && m.id !== starter.id)
+      .map(m => {
         const au = normAuthor(m.author);
         return {
           id: m.id,
@@ -195,11 +216,11 @@ async function main() {
           images: extractImages(m),
         };
       })
-      .filter((c) => (c.content && c.content.trim()) || (c.images && c.images.length))
+      .filter(c => (c.content && c.content.trim()) || (c.images && c.images.length))
       .reverse();
 
-    const content = extractText(starter);
-    const images = extractImages(starter);
+    const content = starter ? extractText(starter) : "";
+    const images = starter ? extractImages(starter) : [];
 
     posts.push({
       id: th.id,
@@ -208,6 +229,7 @@ async function main() {
       content,
       images,
 
+      // если starter не доступен — хотя бы время треда
       created_at: toISO(starter?.timestamp) || toISO(th.created_at),
 
       channel_id: String(FORUM_CHANNEL_ID),
@@ -218,19 +240,17 @@ async function main() {
       author: a.name,
       author_tag: a.tag,
 
-      url: th.guild_id
-        ? `https://discord.com/channels/${th.guild_id}/${th.id}`
-        : null,
+      url: th.guild_id ? `https://discord.com/channels/${th.guild_id}/${th.id}` : null,
 
       comments,
     });
 
     console.log(
-      "OK thread",
+      "THREAD OK",
       th.id,
       "starter_len",
       content.length,
-      "starter_imgs",
+      "imgs",
       images.length,
       "comments",
       comments.length
@@ -246,4 +266,3 @@ main().catch((e) => {
   console.error(e);
   process.exit(1);
 });
-

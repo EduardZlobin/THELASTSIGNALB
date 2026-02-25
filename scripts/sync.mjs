@@ -20,6 +20,13 @@ async function api(path) {
   return text ? JSON.parse(text) : null;
 }
 
+// 1) Активные треды форума (важно!)
+async function getActiveThreads(channelId) {
+  // Возвращает { threads: [...], members: [...], has_more: bool }
+  return api(`/channels/${channelId}/threads/active`);
+}
+
+// 2) Архивные треды форума
 async function getArchivedPublicThreads(channelId, limit = 50) {
   return api(`/channels/${channelId}/threads/archived/public?limit=${limit}`);
 }
@@ -32,29 +39,30 @@ async function getMessage(threadId, messageId) {
   return api(`/channels/${threadId}/messages/${messageId}`);
 }
 
-async function getActiveThreads(channelId) {
-  return api(`/channels/${channelId}/threads/active`);
+function toISO(ts) {
+  try {
+    return ts ? new Date(ts).toISOString() : null;
+  } catch {
+    return null;
+  }
 }
 
-async function getAllThreads(channelId) {
-  const active = await getActiveThreads(channelId);
-  const archived = await getArchivedPublicThreads(channelId);
-  return {
-    threads: [...(active?.threads || []), ...(archived?.threads || [])],
-  };
+function normAuthor(a) {
+  if (!a) return { name: "unknown", tag: "unknown" };
+  const disc =
+    a.discriminator && a.discriminator !== "0" ? `#${a.discriminator}` : "";
+  return { name: a.username || "unknown", tag: `${a.username || "unknown"}${disc}` };
 }
 
 function extractText(m) {
   const parts = [];
-
-  const content = (m?.content || "").trim();
-  if (content) parts.push(content);
+  const c = (m?.content || "").trim();
+  if (c) parts.push(c);
 
   const embeds = Array.isArray(m?.embeds) ? m.embeds : [];
   for (const e of embeds) {
     if (e?.title) parts.push(String(e.title).trim());
     if (e?.description) parts.push(String(e.description).trim());
-
     const fields = Array.isArray(e?.fields) ? e.fields : [];
     for (const f of fields) {
       const name = (f?.name || "").trim();
@@ -83,45 +91,52 @@ function extractImages(m) {
   return [...new Set(urls)];
 }
 
-function normAuthor(a) {
-  if (!a) return { name: "unknown", tag: "unknown" };
-  const disc =
-    a.discriminator && a.discriminator !== "0" ? `#${a.discriminator}` : "";
-  return { name: a.username || "unknown", tag: `${a.username || "unknown"}${disc}` };
-}
-
-function toISO(ts) {
-  try { return ts ? new Date(ts).toISOString() : null; } catch { return null; }
+function uniqThreads(list) {
+  const map = new Map();
+  for (const t of list) map.set(t.id, t);
+  return [...map.values()];
 }
 
 async function main() {
-  const all = await getAllThreads(FORUM_CHANNEL_ID);
-  const threads = all?.threads || [];
+  // Берём и активные, и архивные
+  const active = await getActiveThreads(FORUM_CHANNEL_ID);
+  const archived = await getArchivedPublicThreads(FORUM_CHANNEL_ID, 50);
+
+  const threads = uniqThreads([
+    ...(active?.threads || []),
+    ...(archived?.threads || []),
+  ]);
 
   const posts = [];
 
   for (const th of threads) {
+    // 1) Стартер пост (главное)
     let starter = null;
     if (th.message_id) {
       try {
         starter = await getMessage(th.id, th.message_id);
       } catch (e) {
-        console.warn("Failed to fetch starter by message_id for thread", th.id);
+        // бывает, что message_id не даётся — тогда ниже фоллбек
       }
     }
 
+    // 2) Ответы/комменты
     const msgs = await getMessages(th.id, 100);
-    if (!Array.isArray(msgs) || !msgs.length) continue;
+    const msgList = Array.isArray(msgs) ? msgs : [];
 
-    if (!starter) {
-      starter = msgs[msgs.length - 1];
+    // фоллбек для starter — самое старое сообщение из пачки
+    if (!starter && msgList.length) {
+      starter = msgList[msgList.length - 1];
     }
+
+    // если вообще нет ничего — пропускаем
+    if (!starter && !msgList.length) continue;
 
     const a = normAuthor(starter?.author);
 
-    const comments = msgs
+    // Комментарии = все кроме starter (и только не пустые по смыслу)
+    const comments = msgList
       .filter((m) => starter && m.id !== starter.id)
-      .slice(0, 80)
       .map((m) => {
         const au = normAuthor(m.author);
         return {
@@ -133,15 +148,18 @@ async function main() {
           images: extractImages(m),
         };
       })
+      // выкидываем реально пустые (иногда там системные)
+      .filter((c) => (c.content && c.content.trim()) || (c.images && c.images.length))
       .reverse();
+
+    const content = extractText(starter);
+    const images = extractImages(starter);
 
     posts.push({
       id: th.id,
       title: th.name,
-
-      content: extractText(starter),
-      images: extractImages(starter),
-
+      content,
+      images,
       created_at: toISO(starter?.timestamp) || toISO(th.created_at),
 
       channel_id: String(FORUM_CHANNEL_ID),

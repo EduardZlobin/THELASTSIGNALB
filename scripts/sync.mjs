@@ -32,7 +32,7 @@ async function getActiveThreads(channelId) {
   return api(`/channels/${channelId}/threads/active`);
 }
 
-async function getArchivedPublicThreads(channelId, limit = 50) {
+async function getArchivedPublicThreads(channelId, limit = 500) {
   return api(`/channels/${channelId}/threads/archived/public?limit=${limit}`);
 }
 
@@ -246,3 +246,4 @@ main().catch((e) => {
   console.error(e);
   process.exit(1);
 });
+

@@ -11,24 +11,34 @@ if (!DISCORD_TOKEN || !FORUM_CHANNEL_ID) {
   process.exit(1);
 }
 
-async function api(path) {
+async function api(path, init = {}) {
   const res = await fetch("https://discord.com/api/v10" + path, {
-    headers: { Authorization: `Bot ${DISCORD_TOKEN}` },
+    ...init,
+    headers: {
+      Authorization: `Bot ${DISCORD_TOKEN}`,
+      ...(init.headers || {}),
+    },
   });
-  const text = await res.text();
+
+  // 204 (No Content) — нормальный ответ для joinThread
+  if (res.status === 204) return null;
+
+  const text = await res.text().catch(() => "");
   if (!res.ok) throw new Error(`Discord API ${res.status}: ${text}`);
   return text ? JSON.parse(text) : null;
 }
 
-// 1) Активные треды форума (важно!)
 async function getActiveThreads(channelId) {
-  // Возвращает { threads: [...], members: [...], has_more: bool }
   return api(`/channels/${channelId}/threads/active`);
 }
 
-// 2) Архивные треды форума
 async function getArchivedPublicThreads(channelId, limit = 50) {
   return api(`/channels/${channelId}/threads/archived/public?limit=${limit}`);
+}
+
+async function joinThread(threadId) {
+  // Добавляет бота в тред
+  await api(`/channels/${threadId}/thread-members/@me`, { method: "PUT" });
 }
 
 async function getMessages(threadId, limit = 100) {
@@ -51,7 +61,10 @@ function normAuthor(a) {
   if (!a) return { name: "unknown", tag: "unknown" };
   const disc =
     a.discriminator && a.discriminator !== "0" ? `#${a.discriminator}` : "";
-  return { name: a.username || "unknown", tag: `${a.username || "unknown"}${disc}` };
+  return {
+    name: a.username || "unknown",
+    tag: `${a.username || "unknown"}${disc}`,
+  };
 }
 
 function extractText(m) {
@@ -63,6 +76,7 @@ function extractText(m) {
   for (const e of embeds) {
     if (e?.title) parts.push(String(e.title).trim());
     if (e?.description) parts.push(String(e.description).trim());
+
     const fields = Array.isArray(e?.fields) ? e.fields : [];
     for (const f of fields) {
       const name = (f?.name || "").trim();
@@ -97,10 +111,29 @@ function uniqThreads(list) {
   return [...map.values()];
 }
 
+async function safeJoin(threadId) {
+  try {
+    await joinThread(threadId);
+    return true;
+  } catch (e) {
+    // Частые причины: archived/locked, нет прав, rate limit (редко)
+    console.warn("Could not join thread:", threadId, e?.message || e);
+    return false;
+  }
+}
+
 async function main() {
-  // Берём и активные, и архивные
-  const active = await getActiveThreads(FORUM_CHANNEL_ID);
-  const archived = await getArchivedPublicThreads(FORUM_CHANNEL_ID, 50);
+  const active = await getActiveThreads(FORUM_CHANNEL_ID).catch((e) => {
+    console.warn("Active threads fetch failed:", e?.message || e);
+    return { threads: [] };
+  });
+
+  const archived = await getArchivedPublicThreads(FORUM_CHANNEL_ID, 50).catch(
+    (e) => {
+      console.warn("Archived threads fetch failed:", e?.message || e);
+      return { threads: [] };
+    }
+  );
 
   const threads = uniqThreads([
     ...(active?.threads || []),
@@ -110,31 +143,45 @@ async function main() {
   const posts = [];
 
   for (const th of threads) {
-    // 1) Стартер пост (главное)
+    // 0) join чтобы читать сообщения
+    await safeJoin(th.id);
+
+    // 1) starter message (главный пост)
     let starter = null;
+
     if (th.message_id) {
       try {
         starter = await getMessage(th.id, th.message_id);
       } catch (e) {
-        // бывает, что message_id не даётся — тогда ниже фоллбек
+        console.warn(
+          "Starter fetch by message_id failed for",
+          th.id,
+          e?.message || e
+        );
       }
     }
 
-    // 2) Ответы/комменты
-    const msgs = await getMessages(th.id, 100);
-    const msgList = Array.isArray(msgs) ? msgs : [];
+    // 2) ответы/комменты
+    let msgList = [];
+    try {
+      const msgs = await getMessages(th.id, 100);
+      msgList = Array.isArray(msgs) ? msgs : [];
+    } catch (e) {
+      console.warn("Messages fetch failed for", th.id, e?.message || e);
+    }
 
-    // фоллбек для starter — самое старое сообщение из пачки
+    // fallback: если starter не получили — возьмём самое старое из msgList
     if (!starter && msgList.length) {
       starter = msgList[msgList.length - 1];
     }
 
-    // если вообще нет ничего — пропускаем
-    if (!starter && !msgList.length) continue;
+    if (!starter && !msgList.length) {
+      // нечего сохранять
+      continue;
+    }
 
     const a = normAuthor(starter?.author);
 
-    // Комментарии = все кроме starter (и только не пустые по смыслу)
     const comments = msgList
       .filter((m) => starter && m.id !== starter.id)
       .map((m) => {
@@ -148,7 +195,6 @@ async function main() {
           images: extractImages(m),
         };
       })
-      // выкидываем реально пустые (иногда там системные)
       .filter((c) => (c.content && c.content.trim()) || (c.images && c.images.length))
       .reverse();
 
@@ -158,8 +204,10 @@ async function main() {
     posts.push({
       id: th.id,
       title: th.name,
+
       content,
       images,
+
       created_at: toISO(starter?.timestamp) || toISO(th.created_at),
 
       channel_id: String(FORUM_CHANNEL_ID),
@@ -176,6 +224,17 @@ async function main() {
 
       comments,
     });
+
+    console.log(
+      "OK thread",
+      th.id,
+      "starter_len",
+      content.length,
+      "starter_imgs",
+      images.length,
+      "comments",
+      comments.length
+    );
   }
 
   posts.sort((a, b) => (b.created_at || "").localeCompare(a.created_at || ""));

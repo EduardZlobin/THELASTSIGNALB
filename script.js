@@ -19,7 +19,7 @@ const CONFIG = {
 const SUPABASE_URL = window.SUPABASE_URL || "";       // "https://xxxxx.supabase.co"
 const SUPABASE_ANON_KEY = window.SUPABASE_ANON_KEY || ""; // "eyJhbGciOi..."
 
-let supabase = null;
+let sb = null;
 function canUseSupabase() {
   return !CONFIG.FORCE_DISABLE_SUPABASE && !!(SUPABASE_URL && SUPABASE_ANON_KEY && window.supabase);
 }

@@ -1,91 +1,282 @@
 <!DOCTYPE html>
 <html lang="ru">
 <head>
-  <meta charset="UTF-8" />
-  <meta name="viewport" content="width=device-width,initial-scale=1.0" />
-  <title>THE LAST SIGNAL | Feed</title>
-
-  <link rel="stylesheet" href="style.css" />
-  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600&family=Space+Grotesk:wght@400;500;600&display=swap" rel="stylesheet">
-  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>The Last Signal | ELF-Band Transmission</title>
+    <link rel="stylesheet" href="style.css">
+    <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600&family=Space+Grotesk:wght@400;500;600&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
 </head>
-
 <body>
-  <div class="bg"><div class="fog"></div></div>
-
-  <div class="main-container">
-    <header class="main-header">
-      <div class="header-content">
-        <div class="logo-area" onclick="location.reload()">
-          <div class="logo-icon">📡</div>
-          <div class="logo-text">
-            <h1>THE LAST SIGNAL</h1>
-            <p class="subtitle">ELF-BAND TRANSMISSION</p>
-          </div>
-        </div>
-
-        <div class="header-right">
-          <div class="lang-switch">
-            <button class="lang-btn active" id="lang-ru">RU</button>
-          </div>
-
-          <div class="user-info">
-            <span class="user-name" id="sync-status">SYNC: OFFLINE</span>
-          </div>
-        </div>
-      </div>
-    </header>
-
-    <div class="app-wrapper">
-      <aside class="sidebar">
-        <div class="sidebar-block">
-          <div class="sidebar-main-title">
-            <i class="fas fa-layer-group"></i>
-            <span>TERMINAL MENU</span>
-          </div>
-
-          <button class="btn-nav active" id="btn-global">
-            <i class="fas fa-globe-americas"></i>
-            <span>GLOBAL FEED</span>
-          </button>
-
-          <button class="btn-subscriptions" id="btn-subs">
-            <i class="fas fa-bell"></i>
-            <span>SUBSCRIPTIONS</span>
-          </button>
-
-          <button class="btn-discovery" id="btn-discovery">
-            <i class="fas fa-search-location"></i>
-            <span>FIND CHANNELS</span>
-          </button>
-
-          <div class="section-title">
-            <i class="fas fa-broadcast-tower"></i>
-            <span>CHANNELS</span>
-          </div>
-
-          <div id="publics-list" class="publics-container"></div>
-        </div>
-      </aside>
-
-      <main class="main-content">
-        <div id="posts-container" class="posts-container"></div>
-      </main>
-
-      <aside class="right-sidebar">
-        <div class="sidebar-block">
-          <div class="sidebar-main-title">
-            <i class="fas fa-satellite-dish"></i>
-            <span>ACTIVE NODES</span>
-          </div>
-          <div class="online-users-container">
-            <div class="empty-state">Static site. Nodes are… mostly imaginary.</div>
-          </div>
-        </div>
-      </aside>
+    <div class="bg">
+        <div class="fog"></div>
     </div>
-  </div>
 
-  <script src="script.js"></script>
+    <div class="main-container">
+        <header class="main-header">
+            <div class="header-content">
+                <div class="logo-area" onclick="location.reload()">
+                    <div class="logo-icon">📡</div>
+                    <div class="logo-text">
+                        <h1>THE LAST SIGNAL</h1>
+                        <p class="subtitle">ELF-BAND TRANSMISSION</p>
+                    </div>
+                </div>
+                
+                <div class="header-right">
+                    <div class="lang-switch">
+                        <button class="lang-btn" onclick="setLanguage('en')" id="lang-en">EN</button>
+                        <div class="lang-divider"></div>
+                        <button class="lang-btn" onclick="setLanguage('ru')" id="lang-ru">RU</button>
+                    </div>
+                    <div id="auth-section"></div>
+                </div>
+            </div>
+        </header>
+
+        <div class="app-wrapper">
+            <aside class="sidebar">
+    <div class="sidebar-block">
+            <!-- ЗАГОЛОВОК БОКОВОЙ ПАНЕЛИ -->
+    <div class="sidebar-main-title">
+        <i class="fas fa-layer-group"></i>
+        <span data-t="terminal_menu">TERMINAL MENU</span>
+    </div>
+
+        <button class="btn-nav active" id="btn-global" onclick="loadPosts(null)">
+            <i class="fas fa-globe-americas"></i>
+            <span data-t="global_feed">GLOBAL FEED</span>
+        </button>
+        
+        <button class="btn-subscriptions" id="btn-subs" onclick="loadSubscriptionsFeed()">
+            <i class="fas fa-bell"></i>
+            <span data-t="subscriptions">SUBSCRIPTIONS</span>
+        </button>
+
+        <button class="btn-discovery" id="btn-discovery" onclick="loadDiscoveryView()">
+            <i class="fas fa-search-location"></i>
+            <span data-t="find_channels">FIND CHANNELS</span>
+        </button>
+        
+        <div class="section-title">
+            <i class="fas fa-broadcast-tower"></i>
+            <span data-t="my_channels">MY CHANNELS</span>
+        </div>
+        <div id="publics-list" class="publics-container"></div>
+    </div>
+    
+    <!-- Кнопка админа теперь будет чуть ниже, отдельно -->
+    <button id="admin-btn" class="btn-admin hidden" onclick="toggleAdminPanel()">
+        <i class="fas fa-terminal"></i>
+        <span data-t="admin_console">ADMIN CONSOLE</span>
+    </button>
+</aside>
+            <main class="main-content">
+                <!-- Панель создания поста пользователем (в пабликах) -->
+                <div id="user-post-area" class="user-post-panel hidden">
+                    <div class="panel-header">
+                        <i class="fas fa-paper-plane"></i>
+                        <span data-t="broadcast_signal">BROADCAST SIGNAL</span>
+                    </div>
+                    <input type="text" id="user-post-title" data-t-placeholder="subject_placeholder" class="post-input">
+                    <textarea id="user-post-content" data-t-placeholder="data_payload_placeholder" class="post-textarea"></textarea>
+                    <div class="post-actions-row">
+                        <div class="upload-area user-upload" onclick="document.getElementById('user-post-file-hidden').click()">
+                            <label class="file-label">
+                                <i class="fas fa-image"></i>
+                                <span data-t="upload_image">UPLOAD IMAGE</span>
+                            </label>
+                            <input type="file" id="user-post-file-hidden" accept="image/*" style="display:none" onchange="handleUserFileSelect(event)">
+                            <span id="user-file-info" class="file-info">No file selected</span>
+                        </div>
+                        <button class="btn-execute send-btn" onclick="createUserPost()">
+                            <i class="fas fa-paper-plane"></i>
+                            <span data-t="send">SEND</span>
+                        </button>
+                    </div>
+                </div>
+
+                <!-- Консоль администратора -->
+                <div id="admin-panel" class="admin-panel hidden">
+                    <div class="admin-header">
+                        <div class="admin-title">
+                            <i class="fas fa-terminal"></i>
+                            <span data-t="terminal_access">TERMINAL ACCESS</span>
+                        </div>
+                        <button class="btn-close-admin" onclick="toggleAdminPanel()">
+                            <i class="fas fa-times"></i>
+                            <span data-t="close">CLOSE</span>
+                        </button>
+                    </div>
+                    
+                    <div class="admin-grid">
+                        <div class="admin-card">
+                            <div class="admin-card-header">
+                                <i class="fas fa-plus-circle"></i>
+                                <span data-t="register_channel">REGISTER CHANNEL</span>
+                            </div>
+                            <input type="text" id="new-pub-name" data-t-placeholder="channel_name_placeholder" class="admin-input">
+                            <div class="upload-area" onclick="document.getElementById('pub-file-hidden').click()">
+                                <label class="file-label">
+                                    <i class="fas fa-cloud-upload-alt"></i>
+                                    <span data-t="upload_avatar">UPLOAD AVATAR</span>
+                                </label>
+                                <input type="file" id="pub-file-hidden" accept="image/*" style="display:none" onchange="handlePubFileSelect(event)">
+                                <span id="pub-file-name" class="file-info">No file selected</span>
+                            </div>
+                            <label class="checkbox-label">
+                                <input type="checkbox" id="new-pub-verify">
+                                <span class="checkmark"></span>
+                                <span data-t="verified">Verified</span>
+                            </label>
+                            <button class="btn-execute" onclick="createNewPublic()">
+                                <i class="fas fa-play"></i>
+                                <span data-t="execute">EXECUTE</span>
+                            </button>
+                        </div>
+
+                        <div class="admin-card">
+                            <div class="admin-card-header">
+                                <i class="fas fa-satellite"></i>
+                                <span data-t="broadcast_signal">BROADCAST SIGNAL</span>
+                            </div>
+                            <select id="post-public-id" class="admin-select"></select>
+                            <input type="text" id="post-title" data-t-placeholder="subject_placeholder" class="admin-input">
+                            <textarea id="post-content" data-t-placeholder="data_payload_placeholder" class="admin-textarea"></textarea>
+                            <div class="upload-area" onclick="document.getElementById('post-file-hidden').click()">
+                                <label class="file-label">
+                                    <i class="fas fa-cloud-upload-alt"></i>
+                                    <span data-t="upload_image">UPLOAD IMAGE</span>
+                                </label>
+                                <input type="file" id="post-file-hidden" accept="image/*" style="display:none" onchange="handlePostFileSelect(event)">
+                                <span id="post-file-name" class="file-info">No file selected</span>
+                            </div>
+                            <button class="btn-execute" onclick="createNewPost()">
+                                <i class="fas fa-play"></i>
+                                <span data-t="execute">EXECUTE</span>
+                            </button>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Контейнер для постов или обзора каналов -->
+                <div id="posts-container" class="posts-container"></div>
+            </main>
+            <aside class="right-sidebar">
+                <div class="sidebar-block">
+                    <div class="sidebar-main-title">
+                        <i class="fas fa-satellite-dish"></i>
+                        <span data-t="active_nodes">ACTIVE NODES</span>
+                    </div>
+                    <div id="online-users-list" class="online-users-container">
+                        <!-- Сюда JS будет подставлять юзеров в реальном времени -->
+                    </div>
+                </div>
+            </aside>
+        </div> <!-- Конец app-wrapper -->
+        </div>
+    </div>
+
+    <!-- Модальное окно Входа/Регистрации -->
+    <div id="auth-modal" class="modal hidden">
+        <div class="modal-overlay" onclick="closeModal()"></div>
+        <div class="modal-content">
+            <div class="modal-header">
+                <div class="modal-icon"><i class="fas fa-signal"></i></div>
+                <h2 id="auth-title" data-t="connection">CONNECTION</h2>
+            </div>
+            <div class="modal-body">
+                <div class="input-group">
+                    <i class="fas fa-user-astronaut"></i>
+                    <input type="text" id="auth-username-input" data-t-placeholder="callsign_placeholder" placeholder="CALLSIGN">
+                </div>
+                <div class="input-group">
+                    <i class="fas fa-key"></i>
+                    <input type="password" id="auth-password" data-t-placeholder="encryption_placeholder" placeholder="ENCRYPTION KEY">
+                </div>
+                <button class="btn-primary modal-btn" onclick="handleAuth()">
+                    <i class="fas fa-link"></i>
+                    <span id="auth-button-text">ESTABLISH</span>
+                </button>
+                <p class="modal-toggle" onclick="toggleAuthMode()">
+                    <i class="fas fa-exchange-alt"></i>
+                    <span id="toggle-text">Switch to Register</span>
+                </p>
+            </div>
+            <div class="modal-footer">
+                <button class="btn-secondary" onclick="closeModal()">
+                    <i class="fas fa-ban"></i> <span data-t="abort">ABORT</span>
+                </button>
+            </div>
+        </div>
+    </div>
+
+    <!-- НОВОЕ КОМПАКТНОЕ МОДАЛЬНОЕ ОКНО ПРОФИЛЯ -->
+    <div id="profile-modal" class="modal hidden">
+        <div class="modal-overlay" onclick="closeProfileModal()"></div>
+        <div class="modal-content profile-compact-content">
+            <!-- Верхняя панель: Аватар + Главная инфо -->
+            <div class="profile-top-bar">
+                <div class="profile-avatar-wrapper">
+                    <img id="profile-avatar-img" src="" class="profile-avatar-compact">
+                    <div id="profile-avatar-upload" class="avatar-edit-icon hidden">
+                        <i class="fas fa-pen"></i>
+                    </div>
+                    <input type="file" id="profile-avatar-file" accept="image/*" style="display:none" onchange="uploadProfileAvatar(event)">
+                </div>
+                
+                <div class="profile-main-info">
+                    <div class="profile-nick-row">
+                        <h2 id="profile-username">@USER</h2>
+                        <div id="profile-status-dot" class="status-indicator"></div> <!-- Статус здесь -->
+                        <span id="profile-role" class="role-badge">USER</span>
+                    </div>
+                    <div id="profile-bio-display" class="profile-bio-mini"></div>
+                    <div id="profile-bio-edit" class="profile-bio-edit hidden">
+                        <textarea id="profile-bio-textarea"></textarea>
+                        <button class="btn-primary btn-xs" onclick="saveProfileBio()">SAVE</button>
+                    </div>
+                    <button id="edit-bio-btn" class="bio-edit-link" onclick="toggleBioEdit()">[ Edit Bio ]</button>
+                </div>
+
+                <div class="profile-rating-pill">
+                    <button class="rate-btn" onclick="rateUser('down')"><i class="fas fa-chevron-down"></i></button>
+                    <span id="profile-rating-score">0</span>
+                    <button class="rate-btn" onclick="rateUser('up')"><i class="fas fa-chevron-up"></i></button>
+                </div>
+            </div>
+
+            <!-- Сетка статистики (в одну строку) -->
+            <div class="profile-stats-bar">
+                <div class="mini-stat"><strong>Posts:</strong> <span id="profile-posts-count">0</span></div>
+                <div class="mini-stat"><strong>Activity:</strong> <span id="profile-comments-count">0</span></div>
+                <div class="mini-stat"><strong>Followers:</strong> <span id="profile-followers-count">0</span></div>
+            </div>
+
+            <!-- Две колонки: Активность и Отзывы -->
+            <div class="profile-columns">
+                <div class="profile-col">
+                    <div class="col-header"><i class="fas fa-stream"></i> RECENT LOGS</div>
+                    <div id="profile-comments-container" class="compact-scroll-area"></div>
+                    <button id="load-more-comments" class="btn-load-more" onclick="loadMoreComments()">LOAD MORE</button>
+                </div>
+                
+                <div class="profile-col">
+                    <div class="col-header"><i class="fas fa-star"></i> REVIEWS</div>
+                    <div id="profile-reviews-container" class="compact-scroll-area"></div>
+                    <div class="mini-review-input">
+                        <input type="text" id="review-text" data-t-placeholder="write_review" placeholder="Write review...">
+                        <button onclick="submitReview()"><i class="fas fa-paper-plane"></i></button>
+                    </div>
+                </div>
+            </div>
+
+            <button class="btn-close-compact" onclick="closeProfileModal()"><i class="fas fa-times"></i></button>
+        </div>
+    </div>
+
+    <script src="script.js"></script>
 </body>
 </html>

@@ -1,9 +1,3 @@
-/*  THE LAST SIGNAL — Hybrid Feed
-    - Discord forum -> posts.json (GitHub Actions)
-    - User posts / publics / subscriptions -> Supabase
-    Works even if Supabase is not configured: Discord-only fallback.
-*/
-
 const CONFIG = {
   POSTS_JSON_URL: "posts.json",
   CACHE_BUST: true,

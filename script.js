@@ -924,22 +924,25 @@ function fmtTime(d) {
 }
 
 function fallbackAvatar(name) {
-  // simple deterministic SVG data-url
-  const s = String(name || "X").trim().toUpperCase();
-  const ch = s[0] || "X";
-  const hue = (hash(s) % 360 + 360) % 360;
-  const svg =
-    `<svg xmlns="http://www.w3.org/2000/svg" width="96" height="96">
-      <defs>
-        <linearGradient id="g" x1="0" x2="1" y1="0" y2="1">
-          <stop offset="0" stop-color="hsl(${hue},90%,55%)"/>
-          <stop offset="1" stop-color="hsl(${(hue+60)%360},90%,55%)"/>
-        </linearGradient>
-      </defs>
-      <rect width="96" height="96" rx="18" fill="url(#g)"/>
-      <text x="48" y="60" font-size="44" text-anchor="middle" fill="rgba(0,0,0,.55)" font-family="Inter,Arial" font-weight="700">${escapeXml(ch)}</text>
-    </svg>`;
-  return `data:image/svg+xml;charset=utf-8,${encodeURIComponent(svg)}`;
+  const s = String(name || "?").trim();
+  // Берём первые 2 "символа" корректно (по codepoint, а не по UTF-16)
+  const chars = Array.from(s);
+  const initials = (chars.slice(0, 2).join("") || "?").toUpperCase();
+
+  const svg = `
+  <svg xmlns="http://www.w3.org/2000/svg" width="80" height="80">
+    <defs>
+      <linearGradient id="g" x1="0" y1="0" x2="1" y2="1">
+        <stop offset="0" stop-color="#7896ff"/>
+        <stop offset="1" stop-color="#a078ff"/>
+      </linearGradient>
+    </defs>
+    <rect width="80" height="80" rx="18" fill="url(#g)"/>
+    <text x="50%" y="54%" text-anchor="middle" font-family="Inter, Arial"
+          font-size="28" fill="white">${escapeHtml(initials)}</text>
+  </svg>`;
+
+  return "data:image/svg+xml;charset=utf-8," + encodeURIComponent(svg);
 }
 
 function toast(msg) {

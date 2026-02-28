@@ -1,18 +1,16 @@
 const CONFIG = {
-  POSTS_JSON_URL: "posts.json",
-  CACHE_BUST: true,
+  POSTS_URL: "posts.json",
   AUTO_REFRESH_MS: 60_000,
+  CACHE_BUST: true,
+  MAX_POSTS: 200,
+  MAX_IMAGES_PER_POST: 6,
+  MAX_COMMENTS_RENDER: 80,
 
-  // Discord rendering limits
-  MAX_DISCORD_POSTS: 250,
-  MAX_IMAGES_PER_POST: 8,
-  MAX_COMMENTS_RENDER: 120,
-
-  // Supabase rendering limits
-  MAX_DB_POSTS: 250,
-
-  // If you want to force Supabase off for debugging
-  FORCE_DISABLE_SUPABASE: false,
+  // === Supabase (опционально) ===
+  SUPABASE_ENABLED: true,
+  SUPABASE_URL: "https://adzxwgaoozuoamqqwkcd.supabase.co",
+  SUPABASE_ANON_KEY: "sb_publishable_MxwhklaWPh4uOnvl_WI4eg_ceEre8pi",
+  SUPABASE_POSTS_TABLE: "posts",
 };
 
 // ====== SUPABASE CONFIG (set these) ======
@@ -58,6 +56,14 @@ const state = {
   lastLoadedAt: null,
   selectedUserFile: null,
 };
+
+function getSupabaseClient() {
+  if (!CONFIG.SUPABASE_ENABLED) return null;
+  if (!window.supabase || !window.supabase.createClient) return null;
+
+  // ВАЖНО: не называем переменную "supabase"
+  return window.supabase.createClient(CONFIG.SUPABASE_URL, CONFIG.SUPABASE_ANON_KEY);
+}
 
 // ====== DOM ======
 const el = {
@@ -318,50 +324,30 @@ async function refresh(firstLoad) {
   try {
     setStatus("SYNC: LOADING…", true);
 
+    const url = CONFIG.CACHE_BUST ? withBust(CONFIG.POSTS_URL) : CONFIG.POSTS_URL;
+
     // 1) Discord posts.json
-    const discordUrl = CONFIG.CACHE_BUST
-      ? `${CONFIG.POSTS_JSON_URL}?t=${Date.now()}`
-      : CONFIG.POSTS_JSON_URL;
+    const discordPosts = await loadDiscordPosts(url);
 
-    const [discordPosts, dbPosts] = await Promise.all([
-      loadDiscordPosts(discordUrl),
-      loadDbPostsSafe(),
-    ]);
+    // 2) DB posts (Supabase)
+    const dbPosts = await loadDbPosts();
 
-    state.postsDiscord = discordPosts.slice(0, CONFIG.MAX_DISCORD_POSTS);
-    state.postsDb = dbPosts.slice(0, CONFIG.MAX_DB_POSTS);
+    // 3) Merge + sort
+    const merged = [...discordPosts, ...dbPosts]
+      .filter(Boolean)
+      .sort((a, b) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime())
+      .slice(0, CONFIG.MAX_POSTS);
 
-    // 2) combine & sort
-    state.posts = [...state.postsDb, ...state.postsDiscord].sort((a, b) => {
-      const ta = a.created_at || "";
-      const tb = b.created_at || "";
-      return tb.localeCompare(ta);
-    });
+    state.posts = merged;
+    state.channels = buildChannelsFromPosts(merged); // если у тебя есть список каналов слева
+    state.lastLoadedAt = new Date().toISOString();
 
-    // 3) channels
-    state.channels = buildChannels(state.posts);
-
-    state.lastLoadedAt = new Date();
-    setStatusOk();
-
-    // guard: if channel disappeared
-    if (
-      state.view === "channel" &&
-      state.channelId &&
-      !state.channels.find((c) => c.id === state.channelId)
-    ) {
-      state.view = "global";
-      state.channelId = null;
-    }
-
+    setStatus(`SYNC: OK • ${merged.length}`, false);
     render();
   } catch (e) {
     console.error(e);
     setStatus("SYNC: ERROR", false);
-    if (firstLoad && el.posts) {
-      el.posts.innerHTML =
-        `<div class="empty-state">Не могу загрузить ленту. Проверь: posts.json рядом с index.html, и Supabase (если включён).</div>`;
-    }
+    showError("Не могу загрузить ленту. Проверь posts.json и Supabase.");
   }
 }
 
@@ -993,4 +979,42 @@ function prettyBytes(n) {
   let i = 0, v = Number(n || 0);
   while (v >= 1024 && i < u.length - 1) { v /= 1024; i++; }
   return `${v.toFixed(i ? 1 : 0)} ${u[i]}`;
+}
+
+async function loadDbPosts() {
+  const sb = getSupabaseClient();
+  if (!sb) return [];
+
+  // Под тебя: в схеме есть posts.is_user_post (bool)
+  const { data, error } = await sb
+    .from(CONFIG.SUPABASE_POSTS_TABLE)
+    .select("id,title,content,image_url,public_id,author_name,show_author,likes_count,created_at,is_user_post")
+    .eq("is_user_post", true)
+    .order("created_at", { ascending: false })
+    .limit(CONFIG.MAX_POSTS);
+
+  if (error) {
+    console.warn("Supabase load failed:", error);
+    return [];
+  }
+
+  return (data || []).map(row => ({
+    // приводим к формату как у discord posts.json
+    id: `db_${row.id}`,
+    title: row.title || "",
+    content: row.content || "",
+    images: row.image_url ? [row.image_url] : [],
+    created_at: row.created_at,
+    channel_id: `db_public_${row.public_id ?? "0"}`,
+    channel_name: "USER POSTS",
+    channel_verified: true,
+    channel_avatar: null,
+    author: (row.show_author === false) ? "Anonymous" : (row.author_name || "User"),
+    author_tag: (row.show_author === false) ? "anon" : (row.author_name || "user"),
+    url: null,
+    comments: [],
+
+    // доп. маркер, чтобы в UI можно было отличать
+    __source: "db",
+  }));
 }

@@ -101,6 +101,31 @@ function fmtTime(iso){
   }
 }
 
+async function loadDbChannels(){
+  if (!sbClient) return [];
+  const res = await sbClient
+    .from(CONFIG.SUPABASE_PUBLICS_TABLE)
+    .select("id,name,avatar_url,is_verified,created_at")
+    .order("created_at", { ascending: false })
+    .limit(200);
+
+  if (res.error) {
+    console.warn("DB channels load failed:", res.error);
+    return [];
+  }
+
+  return (res.data || []).map(p => ({
+    id: `p_${p.id}`,
+    name: p.name || `PUBLIC #${p.id}`,
+    avatar: p.avatar_url || null,
+    verified: !!p.is_verified,
+    count: 0,
+    lastAt: null,
+    lastTitle: "—",
+    source: "db"
+  }));
+}
+
 // ---------- UTIL: avatar fallback (fixes URIError with emoji) ----------
 function fallbackAvatar(name){
   const s = String(name || "?").trim();
@@ -668,6 +693,16 @@ async function refresh(firstLoad){
 
     state.posts = merged;
     state.channels = buildChannelsFromPosts(merged);
+
+const dbChannels = await loadDbChannels();
+
+// merge channels: то, что из постов — обновляет count/lastAt,
+// а паблики без постов просто добавляются
+const map = new Map(state.channels.map(c => [c.id, c]));
+for (const c of dbChannels) {
+  if (!map.has(c.id)) map.set(c.id, c);
+}
+state.channels = [...map.values()].sort((a,b)=> (b.lastAt||"").localeCompare(a.lastAt||""));
 
     state.lastLoadedAt = new Date().toISOString();
     setStatus(`SYNC: OK • ${fmtTime(state.lastLoadedAt)} • ${merged.length}`);

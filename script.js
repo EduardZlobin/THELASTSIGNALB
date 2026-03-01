@@ -1,234 +1,623 @@
-const CONFIG = {
-  POSTS_URL: "posts.json",
-  AUTO_REFRESH_MS: 60_000,
-  CACHE_BUST: true,
-  MAX_POSTS: 200,
-  MAX_IMAGES_PER_POST: 6,
-  MAX_COMMENTS_RENDER: 80,
 
-  // === Supabase (опционально) ===
+const CONFIG = {
+  // Discord -> posts.json (рядом с index.html)
+  POSTS_URL: "posts.json",
+  CACHE_BUST: true,
+  AUTO_REFRESH_MS: 60_000,
+
+  MAX_POSTS: 400,
+  MAX_IMAGES_PER_POST: 8,
+  MAX_COMMENTS_RENDER: 120,
+
+  // Supabase (опционально)
   SUPABASE_ENABLED: true,
-  SUPABASE_URL: "https://adzxwgaoozuoamqqwkcd.supabase.co",
-  SUPABASE_ANON_KEY: "sb_publishable_MxwhklaWPh4uOnvl_WI4eg_ceEre8pi",
+  SUPABASE_URL: "",        // <-- вставь сюда
+  SUPABASE_ANON_KEY: "",   // <-- вставь сюда
   SUPABASE_POSTS_TABLE: "posts",
+  SUPABASE_PUBLICS_TABLE: "publics",
+  ONLY_USER_POSTS: false,  // true = брать только is_user_post=true
 };
 
-// ====== SUPABASE CONFIG (set these) ======
-const SUPABASE_URL = window.SUPABASE_URL || "";       // "https://xxxxx.supabase.co"
-const SUPABASE_ANON_KEY = window.SUPABASE_ANON_KEY || ""; // "eyJhbGciOi..."
-
-let sb = null;
-function canUseSupabase() {
-  return !CONFIG.FORCE_DISABLE_SUPABASE && !!(SUPABASE_URL && SUPABASE_ANON_KEY && window.supabase);
-}
-function initSupabase() {
-  if (!canUseSupabase()) return null;
-  try {
-    return window.supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
-  } catch (e) {
-    console.warn("Supabase init failed:", e);
-    return null;
-  }
-}
-
-// ====== STATE ======
+// ---------- STATE ----------
 const state = {
-  // normalized posts in one shape
-  posts: [],          // combined
-  postsDiscord: [],   // only discord
-  postsDb: [],        // only db
-  channels: [],       // combined channels list
+  posts: [],
+  postsDiscord: [],
+  postsDb: [],
+  channels: [],
 
   view: "global",     // global | subs | discovery | channel
-  channelId: null,    // normalized channel id: d_<id> or p_<id>
+  channelId: null,
 
-  // local subscriptions fallback (discord channels)
+  // Discord subscriptions: localStorage
   localSubs: new Set(loadLocalSubs()),
 
-  // supabase session & user
-  session: null,
-  profile: null,
-
-  // supabase-side subscriptions: Set("p_<publicId>")
+  // DB subscriptions (если потом добавишь): пока не используем
   dbSubs: new Set(),
 
-  // misc
   lastLoadedAt: null,
-  selectedUserFile: null,
 };
 
-function getSupabaseClient() {
-  if (!CONFIG.SUPABASE_ENABLED) return null;
-  if (!window.supabase || !window.supabase.createClient) return null;
-
-  // ВАЖНО: не называем переменную "supabase"
-  return window.supabase.createClient(CONFIG.SUPABASE_URL, CONFIG.SUPABASE_ANON_KEY);
-}
-
-// ====== DOM ======
+// ---------- DOM ----------
 const el = {
   posts: document.getElementById("posts-container"),
-  publics: document.getElementById("publics-list"),
+  channels: document.getElementById("publics-list"),
   status: document.getElementById("sync-status"),
 
   btnGlobal: document.getElementById("btn-global"),
   btnSubs: document.getElementById("btn-subs"),
   btnDiscovery: document.getElementById("btn-discovery"),
-
-  // optional (supabase-ui version)
-  authSection: document.getElementById("auth-section"),
-  adminBtn: document.getElementById("admin-btn"),
-  userPostArea: document.getElementById("user-post-area"),
-  userPostTitle: document.getElementById("user-post-title"),
-  userPostContent: document.getElementById("user-post-content"),
-  userFileInfo: document.getElementById("user-file-info"),
 };
 
-// Expose functions for onclick="" from your supabase HTML version
-window.loadPosts = (publicIdOrNull) => {
-  // In your supabase version, this is called with null for global.
-  // We'll map it to view switches:
-  if (publicIdOrNull == null) {
-    state.view = "global";
-    state.channelId = null;
-  } else {
-    state.view = "channel";
-    // assume DB public id passed => channel is p_<id>
-    state.channelId = normalizePublicChannelId(publicIdOrNull);
+// ---------- UTIL: basic ----------
+function withBust(url){
+  try{
+    const u = new URL(url, location.href);
+    u.searchParams.set("_", String(Date.now()));
+    return u.toString();
+  }catch{
+    const sep = url.includes("?") ? "&" : "?";
+    return url + sep + "_=" + Date.now();
   }
-  render();
-};
+}
 
-window.loadSubscriptionsFeed = () => {
-  state.view = "subs";
-  state.channelId = null;
-  render();
-};
+function setStatus(text){
+  if (el.status) el.status.textContent = String(text || "");
+}
 
-window.loadDiscoveryView = () => {
-  state.view = "discovery";
-  state.channelId = null;
-  render();
-};
+function showError(msg){
+  if (!el.posts) return;
+  el.posts.innerHTML = `<div class="empty-state">${escapeHtml(msg || "Ошибка")}</div>`;
+}
 
-window.createUserPost = async () => {
-  // Works only if Supabase available + logged in
-  if (!supabase) {
-    toast("Supabase не подключен. Юзер-посты недоступны.");
-    return;
+function escapeHtml(s){
+  return String(s)
+    .replaceAll("&","&amp;")
+    .replaceAll("<","&lt;")
+    .replaceAll(">","&gt;")
+    .replaceAll('"',"&quot;")
+    .replaceAll("'","&#039;");
+}
+
+function linkifyEscapedText(escapedText){
+  // ожидает уже escapeHtml(text)
+  return escapedText.replace(
+    /(https?:\/\/[^\s<]+)/g,
+    (m) => `<a href="${m}" target="_blank" rel="noopener">${m}</a>`
+  );
+}
+
+function fmtTime(iso){
+  try{
+    const d = iso ? new Date(iso) : new Date();
+    return new Intl.DateTimeFormat("ru-RU", {
+      hour: "2-digit",
+      minute: "2-digit",
+      day: "2-digit",
+      month: "2-digit",
+    }).format(d);
+  }catch{
+    return String(iso || "");
   }
-  if (!state.session?.user) {
-    toast("Сначала авторизация, агент.");
-    return;
+}
+
+// ---------- UTIL: avatar fallback (fixes URIError with emoji) ----------
+function fallbackAvatar(name){
+  const s = String(name || "?").trim();
+  const chars = Array.from(s);
+  const initials = (chars.slice(0, 2).join("") || "?").toUpperCase();
+
+  const hue = (hash(s) % 360 + 360) % 360;
+
+  const svg =
+`<svg xmlns="http://www.w3.org/2000/svg" width="96" height="96">
+  <defs>
+    <linearGradient id="g" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="hsl(${hue},90%,55%)"/>
+      <stop offset="1" stop-color="hsl(${(hue+60)%360},90%,55%)"/>
+    </linearGradient>
+  </defs>
+  <rect width="96" height="96" rx="18" fill="url(#g)"/>
+  <text x="48" y="60" font-size="34" text-anchor="middle"
+        fill="rgba(0,0,0,.55)" font-family="Inter,Arial" font-weight="700">${escapeHtml(initials)}</text>
+</svg>`;
+
+  return `data:image/svg+xml;charset=utf-8,${encodeURIComponent(svg)}`;
+}
+
+function hash(str){
+  let h = 0;
+  for (let i = 0; i < str.length; i++) h = (h * 31 + str.charCodeAt(i)) | 0;
+  return h;
+}
+
+// ---------- SUBS (local discord channels only) ----------
+function loadLocalSubs(){
+  try{
+    const raw = localStorage.getItem("tls_subs_v1");
+    const arr = raw ? JSON.parse(raw) : [];
+    return Array.isArray(arr) ? arr.map(String) : [];
+  }catch{
+    return [];
   }
-  if (!el.userPostTitle || !el.userPostContent) {
-    toast("UI для поста не найден (нет полей в HTML).");
-    return;
+}
+function saveLocalSubs(set){
+  try{
+    localStorage.setItem("tls_subs_v1", JSON.stringify([...set]));
+  }catch{}
+}
+
+function isSubscribed(channelId){
+  // пока только local subs (discord)
+  return state.localSubs.has(channelId);
+}
+
+function toggleLocalSub(channelId){
+  if (state.localSubs.has(channelId)) state.localSubs.delete(channelId);
+  else state.localSubs.add(channelId);
+  saveLocalSubs(state.localSubs);
+}
+
+// ---------- SUPABASE ----------
+let sbClient = null;
+
+function canUseSupabase(){
+  if (!CONFIG.SUPABASE_ENABLED) return false;
+  if (!CONFIG.SUPABASE_URL || !CONFIG.SUPABASE_ANON_KEY) return false;
+  return !!window.supabase?.createClient;
+}
+
+function initSupabase(){
+  if (!canUseSupabase()) return null;
+  try{
+    return window.supabase.createClient(CONFIG.SUPABASE_URL, CONFIG.SUPABASE_ANON_KEY);
+  }catch(e){
+    console.warn("Supabase init failed:", e);
+    return null;
   }
+}
 
-  const title = (el.userPostTitle.value || "").trim();
-  const content = (el.userPostContent.value || "").trim();
+async function loadDbPosts(){
+  if (!sbClient) return [];
 
-  if (!title && !content) {
-    toast("Пустой сигнал. Заполни хотя бы заголовок или текст.");
-    return;
+  try{
+    // 1) posts
+    let q = sbClient
+      .from(CONFIG.SUPABASE_POSTS_TABLE)
+      .select("id,title,content,image_url,public_id,author_name,show_author,likes_count,created_at,is_user_post")
+      .order("created_at", { ascending: false })
+      .limit(CONFIG.MAX_POSTS);
+
+    if (CONFIG.ONLY_USER_POSTS) q = q.eq("is_user_post", true);
+
+    const res = await q;
+    if (res.error) throw res.error;
+
+    const rows = res.data || [];
+
+    // 2) publics map (optional, but красиво)
+    const publicIds = [...new Set(rows.map(r => r.public_id).filter(v => v != null))];
+    const publicsMap = await loadPublicsMap(publicIds);
+
+    // 3) normalize to unified post format
+    return rows.map((p) => {
+      const pub = publicsMap.get(String(p.public_id)) || null;
+      const created = p.created_at ? new Date(p.created_at).toISOString() : null;
+
+      const channelId = `p_${String(p.public_id ?? "0")}`;
+      const channelName = pub?.name || (p.public_id != null ? `PUBLIC #${p.public_id}` : "USER POSTS");
+      const channelAvatar = pub?.avatar_url || null;
+      const channelVerified = Boolean(pub?.is_verified ?? false);
+
+      const showAuthor = p.show_author !== false;
+      const author = showAuthor ? (p.author_name || "User") : "Anonymous";
+      const authorTag = showAuthor ? (p.author_name || "user") : "anon";
+
+      return {
+        id: `u_${String(p.id)}`,
+        source: "db",
+
+        title: String(p.title ?? "Untitled"),
+        content: String(p.content ?? ""),
+        created_at: created,
+
+        channel_id: channelId,
+        channel_name: channelName,
+        channel_avatar: channelAvatar,
+        channel_verified: channelVerified,
+
+        author,
+        author_tag: authorTag,
+
+        images: p.image_url ? [p.image_url] : [],
+        url: null,
+
+        comments: [],
+        likes_count: Number(p.likes_count || 0),
+        is_user_post: true,
+      };
+    });
+  }catch(e){
+    console.warn("DB posts load failed:", e);
+    return [];
   }
+}
 
-  // Determine target public: if currently in a DB public channel, post there; else reject.
-  const targetPublic = currentDbPublicId();
-  if (!targetPublic) {
-    toast("Юзер-пост можно отправлять только внутри DB-паблика (p_<id>).");
-    return;
-  }
+async function loadPublicsMap(publicIds){
+  const map = new Map();
+  if (!sbClient) return map;
+  if (!publicIds || !publicIds.length) return map;
 
-  setStatus("SYNC: SENDING…", true);
+  try{
+    const res = await sbClient
+      .from(CONFIG.SUPABASE_PUBLICS_TABLE)
+      .select("id,name,avatar_url,is_verified")
+      .in("id", publicIds);
 
-  try {
-    // 1) upload image (optional)
-    let imageUrl = null;
+    if (res.error) throw res.error;
 
-    if (state.selectedUserFile) {
-      // You can implement Supabase Storage bucket "post_images"
-      // If you don't have it, comment this block and use direct links only.
-      const file = state.selectedUserFile;
-      const ext = (file.name.split(".").pop() || "png").toLowerCase();
-      const path = `${state.session.user.id}/${Date.now()}_${rand(6)}.${ext}`;
-
-      const bucket = "post_images";
-
-      const up = await supabase.storage.from(bucket).upload(path, file, {
-        cacheControl: "3600",
-        upsert: false,
-      });
-
-      if (up.error) {
-        console.warn(up.error);
-        toast("Не смог загрузить картинку в Storage. Пост всё равно отправлю без неё.");
-      } else {
-        const pub = supabase.storage.from(bucket).getPublicUrl(path);
-        imageUrl = pub?.data?.publicUrl || null;
-      }
+    for (const row of res.data || []) {
+      map.set(String(row.id), row);
     }
+  }catch(e){
+    // если таблицы нет/полей нет — не страшно
+    console.warn("Publics load failed:", e);
+  }
 
-    // 2) insert post
-    const payload = {
-      title,
-      content,
-      image_url: imageUrl,
-      public_id: targetPublic,
-      author_name: state.profile?.username || state.session.user.email || "USER",
-      show_author: true,
-      likes_count: 0,
-      is_user_post: true,
-      // created_at default on db side is better; but we allow fallback:
-      created_at: new Date().toISOString(),
+  return map;
+}
+
+// ---------- DISCORD posts.json ----------
+async function loadDiscordPosts(){
+  const url = CONFIG.CACHE_BUST ? withBust(CONFIG.POSTS_URL) : CONFIG.POSTS_URL;
+
+  try{
+    const res = await fetch(url, { cache: "no-store" });
+    if (!res.ok) throw new Error(`posts.json HTTP ${res.status}`);
+    const json = await res.json();
+    return normalizeDiscordPosts(json);
+  }catch(e){
+    console.warn("Discord posts load failed:", e);
+    return [];
+  }
+}
+
+function normalizeDiscordPosts(input){
+  if (!Array.isArray(input)) return [];
+
+  return input.map((p) => ({
+    id: `d_${String(p.id ?? "") || String(Math.random()).slice(2)}`,
+    source: "discord",
+
+    title: String(p.title ?? "Untitled"),
+    content: String(p.content ?? ""),
+    created_at: p.created_at ? new Date(p.created_at).toISOString() : null,
+
+    channel_id: `d_${String(p.channel_id ?? "unknown")}`,
+    channel_name: String(p.channel_name ?? "UNKNOWN"),
+    channel_avatar: p.channel_avatar ?? null,
+    channel_verified: Boolean(p.channel_verified ?? false),
+
+    author: String(p.author ?? "BOT"),
+    author_tag: String(p.author_tag ?? ""),
+
+    images: Array.isArray(p.images) ? p.images : [],
+    url: p.url ?? null,
+
+    comments: Array.isArray(p.comments) ? p.comments : [],
+    likes_count: 0,
+    is_user_post: false,
+  }));
+}
+
+// ---------- CHANNELS ----------
+function buildChannelsFromPosts(posts){
+  const map = new Map();
+
+  for (const p of posts) {
+    const id = p.channel_id;
+    const cur = map.get(id) || {
+      id,
+      name: p.channel_name,
+      avatar: p.channel_avatar,
+      verified: p.channel_verified,
+      count: 0,
+      lastAt: p.created_at,
+      lastTitle: p.title,
+      source: p.source,
     };
 
-    const ins = await supabase.from("posts").insert(payload).select("*").single();
-    if (ins.error) throw ins.error;
+    cur.count += 1;
 
-    // clear inputs
-    el.userPostTitle.value = "";
-    el.userPostContent.value = "";
-    state.selectedUserFile = null;
-    if (el.userFileInfo) el.userFileInfo.textContent = "No file selected";
+    if (!cur.lastAt || (p.created_at && p.created_at > cur.lastAt)) {
+      cur.lastAt = p.created_at;
+      cur.lastTitle = p.title;
+      cur.name = p.channel_name || cur.name;
+      cur.avatar = p.channel_avatar || cur.avatar;
+      cur.verified = p.channel_verified || cur.verified;
+      cur.source = p.source || cur.source;
+    }
 
-    toast("Сигнал отправлен.");
-    await refresh(false); // reload combined feed
-  } catch (e) {
-    console.error(e);
-    toast("Ошибка отправки. Проверь RLS/таблицы/Storage.");
-  } finally {
-    setStatusOk();
+    map.set(id, cur);
   }
-};
 
-window.handleUserFileSelect = (ev) => {
-  const file = ev?.target?.files?.[0];
-  if (!file) return;
-  state.selectedUserFile = file;
-  if (el.userFileInfo) el.userFileInfo.textContent = `${file.name} (${prettyBytes(file.size)})`;
-};
+  return [...map.values()].sort((a,b) => (b.lastAt || "").localeCompare(a.lastAt || ""));
+}
 
-// ====== BOOT ======
+// ---------- RENDER ----------
+function render(){
+  renderChannelList();
+
+  if (!el.posts) return;
+
+  if (state.view === "discovery") return renderDiscovery();
+  if (state.view === "subs") return renderSubs();
+
+  if (state.view === "channel" && state.channelId) {
+    const list = state.posts.filter(p => p.channel_id === state.channelId);
+    return renderPosts(list, `CHANNEL: ${channelTitle(state.channelId)}`);
+  }
+
+  return renderPosts(state.posts, "GLOBAL FEED");
+}
+
+function renderChannelList(){
+  if (!el.channels) return;
+  el.channels.innerHTML = "";
+
+  if (!state.channels.length) {
+    el.channels.innerHTML = `<div class="empty-state">No channels yet</div>`;
+    return;
+  }
+
+  for (const c of state.channels) {
+    const item = document.createElement("div");
+    item.className = "channel-item";
+
+    const avatar = c.avatar || fallbackAvatar(c.name);
+    const subbed = isSubscribed(c.id);
+
+    item.innerHTML = `
+      <img class="channel-avatar" src="${escapeHtml(avatar)}" alt="">
+      <div class="channel-name">${escapeHtml(c.name)}</div>
+      ${c.verified ? `<i class="fas fa-check-circle channel-verified" title="Verified"></i>` : ""}
+      <div style="margin-left:auto; display:flex; gap:8px;">
+        ${c.id.startsWith("d_") ? `<button class="chip-btn" data-sub>${subbed ? "UNSUB" : "SUB"}</button>` : ``}
+      </div>
+    `;
+
+    item.addEventListener("click", (ev) => {
+      if (ev.target?.closest?.("button")) return;
+      state.view = "channel";
+      state.channelId = c.id;
+      render();
+    });
+
+    const btn = item.querySelector("[data-sub]");
+    btn?.addEventListener("click", (ev) => {
+      ev.preventDefault();
+      ev.stopPropagation();
+      toggleLocalSub(c.id);
+      renderChannelList();
+      if (state.view === "subs") render();
+    });
+
+    el.channels.appendChild(item);
+  }
+}
+
+function renderDiscovery(){
+  el.posts.innerHTML = "";
+
+  const wrap = document.createElement("div");
+  wrap.className = "post-card";
+  wrap.innerHTML = `
+    <div class="post-title">FIND CHANNELS</div>
+    <div style="opacity:.85; margin-bottom:12px;">Поиск по каналам (Discord + DB).</div>
+    <div class="search-container">
+      <i class="fas fa-search"></i>
+      <input id="q" class="discovery-search-input" placeholder="Search channels…" />
+    </div>
+    <div id="grid" class="public-grid" style="margin-top:16px;"></div>
+  `;
+  el.posts.appendChild(wrap);
+
+  const q = wrap.querySelector("#q");
+  const grid = wrap.querySelector("#grid");
+
+  const draw = () => {
+    const s = (q.value || "").trim().toLowerCase();
+    grid.innerHTML = "";
+
+    const list = state.channels.filter(c => !s || c.name.toLowerCase().includes(s));
+
+    if (!list.length) {
+      grid.innerHTML = `<div class="empty-state">Nothing found</div>`;
+      return;
+    }
+
+    for (const c of list) {
+      const card = document.createElement("div");
+      card.className = "public-card";
+
+      const avatar = c.avatar || fallbackAvatar(c.name);
+      const srcLabel = c.id.startsWith("d_") ? "DISCORD" : "DB";
+
+      card.innerHTML = `
+        <div class="public-card-header">
+          <img class="public-card-avatar" src="${escapeHtml(avatar)}" alt="">
+          <div class="public-card-info">
+            <div class="public-card-name">
+              ${escapeHtml(c.name)}
+              ${c.verified ? `<i class="fas fa-check-circle channel-verified"></i>` : ""}
+            </div>
+            <div class="public-card-subs">${srcLabel} • ${c.count} posts</div>
+          </div>
+        </div>
+        <div class="public-card-last-post">
+          <span class="last-post-label">LAST SIGNAL</span>
+          <span class="last-post-title">${escapeHtml(c.lastTitle || "—")}</span>
+        </div>
+        <div style="display:flex; gap:10px;">
+          <button class="btn-secondary" data-open>OPEN</button>
+          ${c.id.startsWith("d_") ? `<button class="btn-secondary" data-sub>${isSubscribed(c.id) ? "UNSUB" : "SUB"}</button>` : ""}
+        </div>
+      `;
+
+      card.querySelector("[data-open]")?.addEventListener("click", () => {
+        state.view = "channel";
+        state.channelId = c.id;
+        render();
+      });
+
+      card.querySelector("[data-sub]")?.addEventListener("click", () => {
+        toggleLocalSub(c.id);
+        draw();
+      });
+
+      grid.appendChild(card);
+    }
+  };
+
+  q.addEventListener("input", draw);
+  draw();
+}
+
+function renderSubs(){
+  const allowed = new Set([...state.localSubs]); // пока только Discord subs
+  const list = state.posts.filter(p => allowed.has(p.channel_id));
+  renderPosts(list, "SUBSCRIPTIONS");
+}
+
+function renderPosts(list, label){
+  el.posts.innerHTML = "";
+
+  if (!list.length) {
+    el.posts.innerHTML = `<div class="empty-state">No posts in ${escapeHtml(label)}</div>`;
+    return;
+  }
+
+  const head = document.createElement("div");
+  head.className = "post-card";
+  head.innerHTML = `
+    <div class="post-title">${escapeHtml(label)}</div>
+    <div style="display:flex; gap:10px; flex-wrap:wrap; opacity:.85;">
+      <span>Discord: ${state.postsDiscord.length}</span>
+      <span>•</span>
+      <span>DB: ${state.postsDb.length}</span>
+      <span>•</span>
+      <span>Total: ${state.posts.length}</span>
+    </div>
+  `;
+  el.posts.appendChild(head);
+
+  for (const p of list) el.posts.appendChild(renderPostCard(p));
+}
+
+function renderPostCard(p){
+  const card = document.createElement("div");
+  card.className = "post-card";
+
+  const avatar = p.channel_avatar || fallbackAvatar(p.channel_name);
+  const time = fmtTime(p.created_at);
+  const verified = p.channel_verified ? `<i class="fas fa-check-circle channel-verified" title="Verified"></i>` : "";
+  const badge = p.source === "discord"
+    ? `<span class="post-author-tag">DISCORD</span>`
+    : `<span class="post-author-tag">DB</span>`;
+
+  const images = (p.images || []).slice(0, CONFIG.MAX_IMAGES_PER_POST);
+  const imagesHtml = images.length ? `
+    <div class="post-images">
+      ${images.map(u => `
+        <a href="${escapeHtml(u)}" target="_blank" rel="noopener">
+          <img class="post-image" src="${escapeHtml(u)}" loading="lazy" alt="">
+        </a>
+      `).join("")}
+    </div>
+  ` : "";
+
+  const contentEsc = escapeHtml(p.content || "");
+  const contentHtml = contentEsc
+    ? `<div class="post-content">${linkifyEscapedText(contentEsc)}</div>`
+    : "";
+
+  const commentsHtml = renderCommentsBlock(p);
+
+  card.innerHTML = `
+    <div class="post-header">
+      <img class="post-avatar" src="${escapeHtml(avatar)}" alt="">
+      <div class="post-meta">
+        <div class="post-channel">
+          ${escapeHtml(p.channel_name)} ${verified} ${badge}
+        </div>
+        <div class="post-time" style="opacity:.75; font-size:12px; margin-top:4px;">
+          <span>${escapeHtml(p.author || "")}</span>
+          <span style="opacity:.5;">•</span>
+          <span>${escapeHtml(time)}</span>
+        </div>
+      </div>
+      ${p.url ? `<a class="btn-secondary" href="${escapeHtml(p.url)}" target="_blank" rel="noopener">OPEN</a>` : ""}
+    </div>
+
+    <div class="post-title">${escapeHtml(p.title || "Untitled")}</div>
+    ${contentHtml}
+    ${imagesHtml}
+    ${commentsHtml}
+  `;
+
+  // click channel name -> open channel
+  card.querySelector(".post-channel")?.addEventListener("click", () => {
+    state.view = "channel";
+    state.channelId = p.channel_id;
+    render();
+  });
+
+  return card;
+}
+
+function renderCommentsBlock(p){
+  const comments = Array.isArray(p.comments) ? p.comments : [];
+  if (!comments.length) return "";
+
+  const slice = comments.slice(0, CONFIG.MAX_COMMENTS_RENDER);
+
+  const items = slice.map((c) => {
+    const when = c.created_at ? fmtTime(c.created_at) : "";
+    const textEsc = escapeHtml(String(c.content || ""));
+    return `
+      <div class="comment-item">
+        <div class="comment-meta">
+          <b>${escapeHtml(c.author || "anon")}</b>
+          <span style="opacity:.5;">•</span>
+          <span>${escapeHtml(when)}</span>
+        </div>
+        ${textEsc ? `<div class="comment-text">${linkifyEscapedText(textEsc)}</div>` : ""}
+      </div>
+    `;
+  }).join("");
+
+  return `<div class="comments-block">${items}</div>`;
+}
+
+function channelTitle(channelId){
+  const c = state.channels.find(x => x.id === channelId);
+  return c?.name || channelId;
+}
+
+// ---------- BOOT ----------
 boot().catch(console.error);
 
-async function boot() {
+async function boot(){
   wireUI();
 
-  supabase = initSupabase();
-
-  if (supabase) {
-    await bootSupabaseAuth();
-    await loadDbSubscriptions();
-  }
+  // init supabase client if possible
+  sbClient = initSupabase();
 
   await refresh(true);
 
   setInterval(() => refresh(false), CONFIG.AUTO_REFRESH_MS);
 }
 
-function wireUI() {
+function wireUI(){
   el.btnGlobal?.addEventListener("click", () => {
     state.view = "global";
     state.channelId = null;
@@ -248,773 +637,45 @@ function wireUI() {
   });
 }
 
-// ====== SUPABASE AUTH (minimal) ======
-async function bootSupabaseAuth() {
-  try {
-    const { data } = await supabase.auth.getSession();
-    state.session = data?.session || null;
+async function refresh(firstLoad){
+  try{
+    setStatus("SYNC: LOADING…");
 
-    // listen
-    supabase.auth.onAuthStateChange((_event, session) => {
-      state.session = session;
-      // refresh profile/subs on login/logout
-      bootSupabaseUser().finally(() => render());
-    });
+    // load in parallel
+    const [discordPosts, dbPosts] = await Promise.all([
+      loadDiscordPosts(),
+      loadDbPosts(),
+    ]);
 
-    await bootSupabaseUser();
-  } catch (e) {
-    console.warn("Auth boot failed:", e);
-  }
-}
+    state.postsDiscord = discordPosts;
+    state.postsDb = dbPosts;
 
-async function bootSupabaseUser() {
-  state.profile = null;
-  state.dbSubs = new Set();
-
-  if (!state.session?.user) {
-    toggleUserPostPanel(false);
-    return;
-  }
-
-  toggleUserPostPanel(true);
-
-  // Load profile (optional)
-  // schema screenshot shows `profiles` has `id (uuid)`, `username`, etc.
-  try {
-    const uid = state.session.user.id;
-    const p = await supabase.from("profiles").select("*").eq("id", uid).maybeSingle();
-    if (!p.error) state.profile = p.data || null;
-  } catch (e) {
-    console.warn("Profile load:", e);
-  }
-
-  await loadDbSubscriptions();
-}
-
-async function loadDbSubscriptions() {
-  if (!supabase || !state.session?.user) return;
-
-  // schema screenshot shows user_subscriptions: user_id (uuid) + public_id (int)
-  try {
-    const uid = state.session.user.id;
-    const res = await supabase
-      .from("user_subscriptions")
-      .select("public_id")
-      .eq("user_id", uid);
-
-    if (res.error) throw res.error;
-
-    const set = new Set();
-    for (const row of res.data || []) {
-      set.add(normalizePublicChannelId(row.public_id));
-    }
-    state.dbSubs = set;
-  } catch (e) {
-    console.warn("Subs load:", e);
-  }
-}
-
-function toggleUserPostPanel(show) {
-  if (!el.userPostArea) return;
-  el.userPostArea.classList.toggle("hidden", !show);
-}
-
-// ====== REFRESH (Discord + DB) ======
-async function refresh(firstLoad) {
-  try {
-    setStatus("SYNC: LOADING…", true);
-
-    const url = CONFIG.CACHE_BUST ? withBust(CONFIG.POSTS_URL) : CONFIG.POSTS_URL;
-
-    // 1) Discord posts.json
-    const discordPosts = await loadDiscordPosts(url);
-
-    // 2) DB posts (Supabase)
-    const dbPosts = await loadDbPosts();
-
-    // 3) Merge + sort
     const merged = [...discordPosts, ...dbPosts]
       .filter(Boolean)
-      .sort((a, b) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime())
+      .sort((a,b) => {
+        const ta = a.created_at ? new Date(a.created_at).getTime() : 0;
+        const tb = b.created_at ? new Date(b.created_at).getTime() : 0;
+        return tb - ta;
+      })
       .slice(0, CONFIG.MAX_POSTS);
 
     state.posts = merged;
-    state.channels = buildChannelsFromPosts(merged); // если у тебя есть список каналов слева
+    state.channels = buildChannelsFromPosts(merged);
+
     state.lastLoadedAt = new Date().toISOString();
+    setStatus(`SYNC: OK • ${fmtTime(state.lastLoadedAt)} • ${merged.length}`);
 
-    setStatus(`SYNC: OK • ${merged.length}`, false);
+    // если открытый канал исчез — сброс
+    if (state.view === "channel" && state.channelId && !state.channels.find(c => c.id === state.channelId)) {
+      state.view = "global";
+      state.channelId = null;
+    }
+
     render();
-  } catch (e) {
+  }catch(e){
     console.error(e);
-    setStatus("SYNC: ERROR", false);
-    showError("Не могу загрузить ленту. Проверь posts.json и Supabase.");
+    setStatus("SYNC: ERROR");
+    showError("Не могу загрузить ленту. Проверь posts.json рядом с index.html и Supabase (если включён).");
+    if (firstLoad) renderChannelList();
   }
-}
-
-async function loadDiscordPosts(url) {
-  try {
-    const res = await fetch(url, { cache: "no-store" });
-    if (!res.ok) throw new Error(`posts.json ${res.status}`);
-    const json = await res.json();
-    return normalizeDiscordPosts(json);
-  } catch (e) {
-    console.warn("Discord posts load failed:", e);
-    return [];
-  }
-}
-
-function normalizeDiscordPosts(input) {
-  if (!Array.isArray(input)) return [];
-
-  return input
-    .map((p) => {
-      const created = p.created_at ? new Date(p.created_at).toISOString() : null;
-      return {
-        // unified
-        id: `d_${String(p.id ?? rnd())}`,
-        source: "discord",
-
-        title: String(p.title ?? "Untitled"),
-        content: String(p.content ?? ""),
-        created_at: created,
-
-        channel_id: `d_${String(p.channel_id ?? "unknown")}`,
-        channel_name: String(p.channel_name ?? "UNKNOWN CHANNEL"),
-        channel_avatar: p.channel_avatar ?? null,
-        channel_verified: Boolean(p.channel_verified ?? false),
-
-        author: String(p.author ?? "BOT"),
-        author_tag: String(p.author_tag ?? ""),
-
-        images: Array.isArray(p.images) ? p.images : [],
-        url: p.url ?? null,
-
-        comments: Array.isArray(p.comments) ? p.comments : [],
-        likes_count: 0,
-        is_user_post: false,
-      };
-    })
-    .sort((a, b) => (b.created_at || "").localeCompare(a.created_at || ""));
-}
-
-async function loadDbPostsSafe() {
-  if (!supabase) return [];
-  try {
-    // Minimal select (your schema: posts has content/title/image_url/public_id/author_name/show_author/likes_count/created_at/is_user_post)
-    const res = await supabase
-      .from("posts")
-      .select("id,title,content,image_url,public_id,author_name,show_author,likes_count,created_at,is_user_post")
-      .order("created_at", { ascending: false })
-      .limit(CONFIG.MAX_DB_POSTS);
-
-    if (res.error) throw res.error;
-
-    // Optional: join publics table for name/avatar/verified
-    const publicIds = [...new Set((res.data || []).map((p) => p.public_id).filter((x) => x != null))];
-    const publicsById = await loadPublicsMap(publicIds);
-
-    return (res.data || []).map((p) => {
-      const pub = publicsById.get(String(p.public_id)) || null;
-      return {
-        id: `u_${String(p.id)}`,
-        source: "user",
-
-        title: String(p.title ?? "Untitled"),
-        content: String(p.content ?? ""),
-        created_at: p.created_at ? new Date(p.created_at).toISOString() : null,
-
-        channel_id: normalizePublicChannelId(p.public_id),
-        channel_name: pub?.name || `PUBLIC #${p.public_id}`,
-        channel_avatar: pub?.avatar_url || null,
-        channel_verified: Boolean(pub?.is_verified ?? false),
-
-        author: String(p.author_name ?? "USER"),
-        author_tag: "",
-
-        images: p.image_url ? [p.image_url] : [],
-        url: null,
-
-        comments: [], // you can add DB comments later
-        likes_count: Number(p.likes_count || 0),
-        is_user_post: true,
-      };
-    });
-  } catch (e) {
-    console.warn("DB posts load failed:", e);
-    return [];
-  }
-}
-
-async function loadPublicsMap(publicIds) {
-  const map = new Map();
-  if (!supabase || !publicIds.length) return map;
-
-  try {
-    const res = await supabase
-      .from("publics")
-      .select("id,name,avatar_url,is_verified")
-      .in("id", publicIds);
-
-    if (res.error) throw res.error;
-
-    for (const row of res.data || []) {
-      map.set(String(row.id), row);
-    }
-  } catch (e) {
-    console.warn("Publics load failed:", e);
-  }
-
-  return map;
-}
-
-function normalizePublicChannelId(publicId) {
-  return `p_${String(publicId)}`;
-}
-
-function currentDbPublicId() {
-  // only allow posting into DB public channel view
-  // channelId like "p_12"
-  const cid = state.channelId || "";
-  if (!cid.startsWith("p_")) return null;
-  const n = cid.slice(2);
-  const id = Number(n);
-  return Number.isFinite(id) ? id : null;
-}
-
-// ====== RENDER ======
-function render() {
-  renderChannelList();
-
-  if (!el.posts) return;
-
-  if (state.view === "discovery") return renderDiscovery();
-
-  if (state.view === "subs") {
-    const allowed = new Set([...state.localSubs, ...state.dbSubs]);
-    const list = state.posts.filter((p) => allowed.has(p.channel_id));
-    return renderPosts(list, "SUBSCRIPTIONS");
-  }
-
-  if (state.view === "channel" && state.channelId) {
-    const list = state.posts.filter((p) => p.channel_id === state.channelId);
-    return renderPosts(list, `CHANNEL: ${channelName(state.channelId)}`);
-  }
-
-  return renderPosts(state.posts, "GLOBAL FEED");
-}
-
-function renderChannelList() {
-  if (!el.publics) return;
-
-  el.publics.innerHTML = "";
-
-  if (!state.channels.length) {
-    el.publics.innerHTML = `<div class="empty-state">No channels yet</div>`;
-    return;
-  }
-
-  for (const c of state.channels) {
-    const item = document.createElement("div");
-    item.className = "channel-item";
-
-    const subbed = isSubscribed(c.id);
-
-    item.innerHTML = `
-      <img class="channel-avatar" src="${escapeAttr(c.avatar || fallbackAvatar(c.name))}" alt="">
-      <div class="channel-name">${escapeHtml(c.name)}</div>
-      ${c.verified ? `<i class="fas fa-check-circle channel-verified" title="Verified"></i>` : ""}
-      <div class="channel-actions" style="margin-left:auto; display:flex; gap:8px;">
-        <button class="chip-btn" data-action="sub">${subbed ? "UNSUB" : "SUB"}</button>
-      </div>
-    `;
-
-    // open channel on click (but not when clicking sub button)
-    item.addEventListener("click", (ev) => {
-      if (ev.target?.closest?.("button")) return;
-      state.view = "channel";
-      state.channelId = c.id;
-      render();
-    });
-
-    // sub/unsub
-    const btn = item.querySelector(`button[data-action="sub"]`);
-    btn?.addEventListener("click", async (ev) => {
-      ev.preventDefault();
-      ev.stopPropagation();
-      await toggleSubscription(c.id);
-      renderChannelList();
-      if (state.view === "subs") render(); // update list
-    });
-
-    el.publics.appendChild(item);
-  }
-}
-
-function renderDiscovery() {
-  // simple: show channel grid as posts area
-  el.posts.innerHTML = "";
-
-  const wrap = document.createElement("div");
-  wrap.className = "post-card";
-  wrap.innerHTML = `
-    <div class="post-title">FIND CHANNELS</div>
-    <div style="opacity:.8; margin-bottom:12px;">Поиск по каналам (и Discord, и DB).</div>
-    <input id="discovery-q" class="discovery-search-input" placeholder="Search channels…" />
-    <div id="discovery-grid" class="public-grid" style="margin-top:16px;"></div>
-  `;
-  el.posts.appendChild(wrap);
-
-  const q = wrap.querySelector("#discovery-q");
-  const grid = wrap.querySelector("#discovery-grid");
-
-  const renderGrid = () => {
-    const s = (q.value || "").trim().toLowerCase();
-    grid.innerHTML = "";
-    const list = state.channels.filter((c) => !s || c.name.toLowerCase().includes(s));
-
-    if (!list.length) {
-      grid.innerHTML = `<div class="empty-state">Nothing found</div>`;
-      return;
-    }
-
-    for (const c of list) {
-      const card = document.createElement("div");
-      card.className = "public-card";
-      card.innerHTML = `
-        <div class="public-card-header">
-          <img class="public-card-avatar" src="${escapeAttr(c.avatar || fallbackAvatar(c.name))}" />
-          <div class="public-card-info">
-            <div class="public-card-name">
-              ${escapeHtml(c.name)}
-              ${c.verified ? `<i class="fas fa-check-circle channel-verified"></i>` : ""}
-            </div>
-            <div class="public-card-subs">${c.source.toUpperCase()} • ${c.count} posts</div>
-          </div>
-        </div>
-        <div class="public-card-last-post">
-          <span class="last-post-label">LAST SIGNAL</span>
-          <span class="last-post-title">${escapeHtml(c.lastTitle || "—")}</span>
-        </div>
-        <div style="display:flex; gap:10px;">
-          <button class="btn-secondary" data-open>OPEN</button>
-          <button class="btn-secondary" data-sub>${isSubscribed(c.id) ? "UNSUB" : "SUB"}</button>
-        </div>
-      `;
-
-      card.querySelector("[data-open]")?.addEventListener("click", () => {
-        state.view = "channel";
-        state.channelId = c.id;
-        render();
-      });
-
-      card.querySelector("[data-sub]")?.addEventListener("click", async () => {
-        await toggleSubscription(c.id);
-        renderGrid();
-      });
-
-      grid.appendChild(card);
-    }
-  };
-
-  q.addEventListener("input", renderGrid);
-  renderGrid();
-}
-
-function renderPosts(list, label) {
-  el.posts.innerHTML = "";
-
-  if (!list.length) {
-    el.posts.innerHTML = `<div class="empty-state">No posts in ${escapeHtml(label)}</div>`;
-    return;
-  }
-
-  // header card
-  const head = document.createElement("div");
-  head.className = "post-card";
-  head.innerHTML = `
-    <div class="post-title">${escapeHtml(label)}</div>
-    <div style="display:flex; gap:10px; flex-wrap:wrap; opacity:.85;">
-      <span>Discord: ${state.postsDiscord.length}</span>
-      <span>•</span>
-      <span>User: ${state.postsDb.length}</span>
-      <span>•</span>
-      <span>Total: ${state.posts.length}</span>
-    </div>
-  `;
-  el.posts.appendChild(head);
-
-  for (const p of list) {
-    el.posts.appendChild(renderPostCard(p));
-  }
-}
-
-function renderPostCard(p) {
-  const card = document.createElement("div");
-  card.className = "post-card";
-
-  const avatar = p.channel_avatar || fallbackAvatar(p.channel_name);
-  const time = p.created_at ? fmtTime(new Date(p.created_at)) : "unknown";
-  const verified = p.channel_verified ? `<i class="fas fa-check-circle channel-verified" title="Verified"></i>` : "";
-  const sourceBadge = p.source === "discord"
-    ? `<span class="post-author-tag">DISCORD</span>`
-    : `<span class="post-author-tag">USER</span>`;
-
-  const images = (p.images || []).slice(0, CONFIG.MAX_IMAGES_PER_POST);
-  const imagesHtml = images.length
-    ? `<div class="post-images">${images.map((u) => `
-        <a href="${escapeAttr(u)}" target="_blank" rel="noopener">
-          <img src="${escapeAttr(u)}" loading="lazy" />
-        </a>
-      `).join("")}</div>`
-    : "";
-
-  const contentHtml = p.content
-    ? `<div class="post-content">${linkify(escapeHtml(p.content))}</div>`
-    : "";
-
-  const commentsHtml = renderComments(p);
-
-  const likePart = p.is_user_post
-    ? `<div class="post-actions">
-         <button class="chip-btn" data-like>LIKE</button>
-         <span style="opacity:.8;">${Number(p.likes_count||0)} likes</span>
-       </div>`
-    : `<div class="post-actions"><span style="opacity:.7;">Discord post</span></div>`;
-
-  card.innerHTML = `
-    <div class="post-header">
-      <img class="post-avatar" src="${escapeAttr(avatar)}" alt="">
-      <div class="post-meta">
-        <div class="post-channel">
-          ${escapeHtml(p.channel_name)} ${verified} ${sourceBadge}
-        </div>
-        <div class="post-time" style="opacity:.75; font-size:12px; margin-top:4px;">
-          <span>${escapeHtml(p.author || "")}</span>
-          <span style="opacity:.5;">•</span>
-          <span>${escapeHtml(time)}</span>
-        </div>
-      </div>
-      ${
-        p.url ? `<a class="btn-secondary" href="${escapeAttr(p.url)}" target="_blank" rel="noopener">OPEN</a>` : ""
-      }
-    </div>
-
-    <div class="post-title">${escapeHtml(p.title || "Untitled")}</div>
-    ${contentHtml}
-    ${imagesHtml}
-    ${likePart}
-    ${commentsHtml}
-  `;
-
-  // open channel click
-  card.querySelector(".post-channel")?.addEventListener("click", () => {
-    state.view = "channel";
-    state.channelId = p.channel_id;
-    render();
-  });
-
-  // like button (db posts only)
-  card.querySelector("[data-like]")?.addEventListener("click", async () => {
-    if (!supabase) return toast("Supabase не подключен.");
-    if (!state.session?.user) return toast("Нужен логин.");
-
-    await likeDbPost(p.id); // p.id is "u_<id>"
-    await refresh(false);
-  });
-
-  return card;
-}
-
-function renderComments(p) {
-  const comments = Array.isArray(p.comments) ? p.comments : [];
-  if (!comments.length) return "";
-
-  const slice = comments.slice(0, CONFIG.MAX_COMMENTS_RENDER);
-  const items = slice.map((c) => {
-    const ct = c.created_at ? fmtTime(new Date(c.created_at)) : "";
-    const text = escapeHtml(String(c.content || ""));
-    return `
-      <div class="comment-item">
-        <div class="comment-meta">
-          <b>${escapeHtml(c.author || "anon")}</b>
-          <span style="opacity:.5;">•</span>
-          <span>${escapeHtml(ct)}</span>
-        </div>
-        ${text ? `<div class="comment-text">${linkify(text)}</div>` : ""}
-      </div>
-    `;
-  }).join("");
-
-  return `<div class="comments-block">${items}</div>`;
-}
-
-// ====== SUBSCRIPTIONS (local discord + db publics) ======
-function isSubscribed(channelId) {
-  if (channelId.startsWith("p_")) return state.dbSubs.has(channelId);
-  return state.localSubs.has(channelId);
-}
-
-async function toggleSubscription(channelId) {
-  if (channelId.startsWith("p_")) {
-    // DB subscription (requires auth)
-    if (!supabase) return toast("Supabase не подключен.");
-    if (!state.session?.user) return toast("Нужен логин, чтобы подписываться на DB-паблики.");
-
-    const publicId = Number(channelId.slice(2));
-    if (!Number.isFinite(publicId)) return;
-
-    if (state.dbSubs.has(channelId)) {
-      // delete
-      const del = await supabase
-        .from("user_subscriptions")
-        .delete()
-        .eq("user_id", state.session.user.id)
-        .eq("public_id", publicId);
-
-      if (del.error) {
-        console.warn(del.error);
-        return toast("Не смог отписаться (RLS?).");
-      }
-
-      state.dbSubs.delete(channelId);
-      toast("Отписка.");
-    } else {
-      const ins = await supabase
-        .from("user_subscriptions")
-        .insert({ user_id: state.session.user.id, public_id: publicId });
-
-      if (ins.error) {
-        console.warn(ins.error);
-        return toast("Не смог подписаться (RLS?).");
-      }
-
-      state.dbSubs.add(channelId);
-      toast("Подписка.");
-    }
-    return;
-  }
-
-  // Local subscription for Discord channels (no auth)
-  if (state.localSubs.has(channelId)) {
-    state.localSubs.delete(channelId);
-  } else {
-    state.localSubs.add(channelId);
-  }
-  saveLocalSubs([...state.localSubs]);
-}
-
-function loadLocalSubs() {
-  try {
-    const raw = localStorage.getItem("tls_subs_v1");
-    const arr = raw ? JSON.parse(raw) : [];
-    if (!Array.isArray(arr)) return [];
-    return arr.map(String);
-  } catch {
-    return [];
-  }
-}
-function saveLocalSubs(arr) {
-  try {
-    localStorage.setItem("tls_subs_v1", JSON.stringify(arr));
-  } catch {}
-}
-
-// ====== LIKE (DB) ======
-async function likeDbPost(prefixedId) {
-  // prefixedId: "u_123"
-  if (!supabase) return;
-  const id = Number(String(prefixedId).replace(/^u_/, ""));
-  if (!Number.isFinite(id)) return;
-
-  // simplest: increment likes_count (race conditions exist, but ok for MVP)
-  // better: separate table post_likes with unique(user_id, post_id)
-  try {
-    const upd = await supabase.rpc("increment_post_like", { post_id_input: id });
-    if (upd.error) {
-      // fallback: direct update
-      const cur = await supabase.from("posts").select("likes_count").eq("id", id).single();
-      if (cur.error) throw cur.error;
-      const next = Number(cur.data?.likes_count || 0) + 1;
-      const up2 = await supabase.from("posts").update({ likes_count: next }).eq("id", id);
-      if (up2.error) throw up2.error;
-    }
-    toast("LIKE +1");
-  } catch (e) {
-    console.warn(e);
-    toast("Не смог лайкнуть. Нужен RLS/RPC.");
-  }
-}
-
-// ====== CHANNELS BUILD ======
-function buildChannels(posts) {
-  const map = new Map();
-
-  for (const p of posts) {
-    const id = p.channel_id;
-    const cur = map.get(id) || {
-      id,
-      name: p.channel_name,
-      avatar: p.channel_avatar,
-      verified: p.channel_verified,
-      lastPostAt: p.created_at,
-      lastTitle: p.title,
-      count: 0,
-      source: p.source || "mixed",
-    };
-
-    cur.count += 1;
-    if (!cur.lastPostAt || (p.created_at && p.created_at > cur.lastPostAt)) {
-      cur.lastPostAt = p.created_at;
-      cur.lastTitle = p.title;
-      cur.name = p.channel_name || cur.name;
-      cur.avatar = p.channel_avatar || cur.avatar;
-      cur.verified = p.channel_verified || cur.verified;
-      cur.source = p.source || cur.source;
-    }
-
-    map.set(id, cur);
-  }
-
-  return [...map.values()].sort((a, b) =>
-    (b.lastPostAt || "").localeCompare(a.lastPostAt || "")
-  );
-}
-
-function channelName(channelId) {
-  const c = state.channels.find((x) => x.id === channelId);
-  return c?.name || channelId;
-}
-
-// ====== STATUS / HELPERS ======
-function setStatus(text, pulse) {
-  if (!el.status) return;
-  el.status.textContent = text;
-  el.status.style.opacity = pulse ? "1" : "0.9";
-}
-function setStatusOk() {
-  const t = state.lastLoadedAt ? fmtTime(state.lastLoadedAt) : fmtTime(new Date());
-  setStatus(`SYNC: OK • ${t}`, false);
-}
-
-function fmtTime(d) {
-  try {
-    return new Intl.DateTimeFormat("ru-RU", {
-      hour: "2-digit",
-      minute: "2-digit",
-      day: "2-digit",
-      month: "2-digit",
-    }).format(d);
-  } catch {
-    return String(d);
-  }
-}
-
-function fallbackAvatar(name) {
-  const s = String(name || "?").trim();
-  // Берём первые 2 "символа" корректно (по codepoint, а не по UTF-16)
-  const chars = Array.from(s);
-  const initials = (chars.slice(0, 2).join("") || "?").toUpperCase();
-
-  const svg = `
-  <svg xmlns="http://www.w3.org/2000/svg" width="80" height="80">
-    <defs>
-      <linearGradient id="g" x1="0" y1="0" x2="1" y2="1">
-        <stop offset="0" stop-color="#7896ff"/>
-        <stop offset="1" stop-color="#a078ff"/>
-      </linearGradient>
-    </defs>
-    <rect width="80" height="80" rx="18" fill="url(#g)"/>
-    <text x="50%" y="54%" text-anchor="middle" font-family="Inter, Arial"
-          font-size="28" fill="white">${escapeHtml(initials)}</text>
-  </svg>`;
-
-  return "data:image/svg+xml;charset=utf-8," + encodeURIComponent(svg);
-}
-
-function toast(msg) {
-  // minimalist: status line flash
-  setStatus(String(msg), true);
-  setTimeout(() => setStatusOk(), 1500);
-}
-
-function escapeHtml(s) {
-  return String(s)
-    .replaceAll("&", "&amp;")
-    .replaceAll("<", "&lt;")
-    .replaceAll(">", "&gt;")
-    .replaceAll('"', "&quot;")
-    .replaceAll("'", "&#039;");
-}
-function escapeAttr(s) {
-  return escapeHtml(s).replaceAll("\n", " ");
-}
-function escapeXml(s) {
-  return String(s).replaceAll("&", "&amp;").replaceAll("<", "&lt;").replaceAll(">", "&gt;");
-}
-
-function linkify(text) {
-  // text already escaped
-  return text.replace(
-    /(https?:\/\/[^\s<]+)/g,
-    (m) => `<a href="${m}" target="_blank" rel="noopener">${m}</a>`
-  );
-}
-
-function rnd() {
-  return Math.random().toString(36).slice(2);
-}
-function rand(n) {
-  const a = "abcdefghijklmnopqrstuvwxyz0123456789";
-  let s = "";
-  for (let i = 0; i < n; i++) s += a[(Math.random() * a.length) | 0];
-  return s;
-}
-function hash(str) {
-  let h = 0;
-  for (let i = 0; i < str.length; i++) h = (h * 31 + str.charCodeAt(i)) | 0;
-  return h;
-}
-function prettyBytes(n) {
-  const u = ["B", "KB", "MB", "GB"];
-  let i = 0, v = Number(n || 0);
-  while (v >= 1024 && i < u.length - 1) { v /= 1024; i++; }
-  return `${v.toFixed(i ? 1 : 0)} ${u[i]}`;
-}
-
-async function loadDbPosts() {
-  const sb = getSupabaseClient();
-  if (!sb) return [];
-
-  // Под тебя: в схеме есть posts.is_user_post (bool)
-  const { data, error } = await sb
-    .from(CONFIG.SUPABASE_POSTS_TABLE)
-    .select("id,title,content,image_url,public_id,author_name,show_author,likes_count,created_at,is_user_post")
-    .eq("is_user_post", true)
-    .order("created_at", { ascending: false })
-    .limit(CONFIG.MAX_POSTS);
-
-  if (error) {
-    console.warn("Supabase load failed:", error);
-    return [];
-  }
-
-  return (data || []).map(row => ({
-    // приводим к формату как у discord posts.json
-    id: `db_${row.id}`,
-    title: row.title || "",
-    content: row.content || "",
-    images: row.image_url ? [row.image_url] : [],
-    created_at: row.created_at,
-    channel_id: `db_public_${row.public_id ?? "0"}`,
-    channel_name: "USER POSTS",
-    channel_verified: true,
-    channel_avatar: null,
-    author: (row.show_author === false) ? "Anonymous" : (row.author_name || "User"),
-    author_tag: (row.show_author === false) ? "anon" : (row.author_name || "user"),
-    url: null,
-    comments: [],
-
-    // доп. маркер, чтобы в UI можно было отличать
-    __source: "db",
-  }));
 }

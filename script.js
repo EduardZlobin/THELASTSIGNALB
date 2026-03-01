@@ -577,7 +577,7 @@ function renderPostCard(p){
           <span>${escapeHtml(time)}</span>
         </div>
       </div>
-      ${p.url ? `<a class="btn-secondary" href="${escapeHtml(p.url)}" target="_blank" rel="noopener">OPEN</a>` : ""}
+      ${""}
     </div>
 
     <div class="post-title">${escapeHtml(p.title || "Untitled")}</div>

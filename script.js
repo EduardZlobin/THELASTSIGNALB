@@ -177,40 +177,45 @@ function initSupabase(){
 }
 
 async function loadDbPosts(){
-  if (!sbClient) return [];
+  // 0) диагностика: включился ли supabase вообще
+  if (!sbClient){
+    console.warn("[DB] sbClient is null. Supabase disabled or not initialized.");
+    return [];
+  }
 
   try{
-    // 1) posts
-    let q = sbClient
-      .from(CONFIG.SUPABASE_POSTS_TABLE)
+    // 1) минимально безопасный запрос
+    // ВАЖНО: сначала без .eq("is_user_post", true), чтобы не отфильтровать всё случайно
+    const res = await sbClient
+      .from(CONFIG.SUPABASE_POSTS_TABLE) // "posts"
       .select("id,title,content,image_url,public_id,author_name,show_author,likes_count,created_at,is_user_post")
       .order("created_at", { ascending: false })
       .limit(CONFIG.MAX_POSTS);
 
-    if (CONFIG.ONLY_USER_POSTS) q = q.eq("is_user_post", true);
-
-    const res = await q;
-    if (res.error) throw res.error;
+    if (res.error) {
+      console.warn("[DB] Supabase error:", res.error);
+      return [];
+    }
 
     const rows = res.data || [];
+    console.log("[DB] loaded rows:", rows.length, rows.slice(0, 3));
 
-    // 2) publics map (optional, but красиво)
+    // 2) если rows пустой — проверим отдельно, сколько is_user_post=true
+    if (rows.length === 0) {
+      const check = await sbClient
+        .from(CONFIG.SUPABASE_POSTS_TABLE)
+        .select("id,is_user_post", { count: "exact", head: true });
+      console.log("[DB] table check count:", check.count, "error:", check.error);
+      return [];
+    }
+
+    // 3) publics map (опционально)
     const publicIds = [...new Set(rows.map(r => r.public_id).filter(v => v != null))];
     const publicsMap = await loadPublicsMap(publicIds);
 
-    // 3) normalize to unified post format
+    // 4) normalize
     return rows.map((p) => {
       const pub = publicsMap.get(String(p.public_id)) || null;
-      const created = p.created_at ? new Date(p.created_at).toISOString() : null;
-
-      const channelId = `p_${String(p.public_id ?? "0")}`;
-      const channelName = pub?.name || (p.public_id != null ? `PUBLIC #${p.public_id}` : "USER POSTS");
-      const channelAvatar = pub?.avatar_url || null;
-      const channelVerified = Boolean(pub?.is_verified ?? false);
-
-      const showAuthor = p.show_author !== false;
-      const author = showAuthor ? (p.author_name || "User") : "Anonymous";
-      const authorTag = showAuthor ? (p.author_name || "user") : "anon";
 
       return {
         id: `u_${String(p.id)}`,
@@ -218,26 +223,27 @@ async function loadDbPosts(){
 
         title: String(p.title ?? "Untitled"),
         content: String(p.content ?? ""),
-        created_at: created,
+        created_at: p.created_at ? new Date(p.created_at).toISOString() : null,
 
-        channel_id: channelId,
-        channel_name: channelName,
-        channel_avatar: channelAvatar,
-        channel_verified: channelVerified,
+        channel_id: `p_${String(p.public_id ?? "0")}`,
+        channel_name: pub?.name || (p.public_id != null ? `PUBLIC #${p.public_id}` : "USER POSTS"),
+        channel_avatar: pub?.avatar_url || null,
+        channel_verified: Boolean(pub?.is_verified ?? false),
 
-        author,
-        author_tag: authorTag,
+        author: (p.show_author === false) ? "Anonymous" : String(p.author_name ?? "User"),
+        author_tag: (p.show_author === false) ? "anon" : String(p.author_name ?? "user"),
 
         images: p.image_url ? [p.image_url] : [],
         url: null,
 
         comments: [],
         likes_count: Number(p.likes_count || 0),
-        is_user_post: true,
+        is_user_post: Boolean(p.is_user_post ?? true),
       };
     });
-  }catch(e){
-    console.warn("DB posts load failed:", e);
+
+  } catch (e) {
+    console.warn("[DB] loadDbPosts crashed:", e);
     return [];
   }
 }

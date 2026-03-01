@@ -472,7 +472,6 @@ function renderDiscovery(){
       card.className = "public-card";
 
       const avatar = c.avatar || fallbackAvatar(c.name);
-      const srcLabel = c.id.startsWith("d_") ? "DISCORD" : "DB";
 
       card.innerHTML = `
         <div class="public-card-header">
@@ -482,7 +481,7 @@ function renderDiscovery(){
               ${escapeHtml(c.name)}
               ${c.verified ? `<i class="fas fa-check-circle channel-verified"></i>` : ""}
             </div>
-            <div class="public-card-subs">${srcLabel} • ${c.count} posts</div>
+            <div class="public-card-subs">${c.count} posts</div>
           </div>
         </div>
         <div class="public-card-last-post">
@@ -531,15 +530,8 @@ function renderPosts(list, label){
   const head = document.createElement("div");
   head.className = "post-card";
   head.innerHTML = `
-    <div class="post-title">${escapeHtml(label)}</div>
-    <div style="display:flex; gap:10px; flex-wrap:wrap; opacity:.85;">
-      <span>Discord: ${state.postsDiscord.length}</span>
-      <span>•</span>
-      <span>DB: ${state.postsDb.length}</span>
-      <span>•</span>
-      <span>Total: ${state.posts.length}</span>
-    </div>
-  `;
+  <div class="post-title">${escapeHtml(label)}</div>
+`;
   el.posts.appendChild(head);
 
   for (const p of list) el.posts.appendChild(renderPostCard(p));
@@ -552,9 +544,7 @@ function renderPostCard(p){
   const avatar = p.channel_avatar || fallbackAvatar(p.channel_name);
   const time = fmtTime(p.created_at);
   const verified = p.channel_verified ? `<i class="fas fa-check-circle channel-verified" title="Verified"></i>` : "";
-  const badge = p.source === "discord"
-    ? `<span class="post-author-tag">DISCORD</span>`
-    : `<span class="post-author-tag">DB</span>`;
+  const badge = ""; // без источников
 
   const images = (p.images || []).slice(0, CONFIG.MAX_IMAGES_PER_POST);
   const imagesHtml = images.length ? `

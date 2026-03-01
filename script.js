@@ -437,33 +437,63 @@ function renderChannelList(){
   }
 }
 
-function renderDiscovery(){
+function renderDiscovery() {
   el.posts.innerHTML = "";
 
-  const wrap = document.createElement("div");
-  wrap.className = "post-card";
-  wrap.innerHTML = `
-    <div class="post-title">FIND CHANNELS</div>
-    <div style="opacity:.85; margin-bottom:12px;">Поиск по каналам (Discord + DB).</div>
-    <div class="search-container">
+  // --- Header row (Back + Search) ---
+  const header = document.createElement("div");
+  header.className = "discovery-header-row";
+  header.innerHTML = `
+    <button class="back-btn" type="button">
+      <i class="fas fa-arrow-left"></i>${currentLang === "ru" ? "ОБЩАЯ ЛЕНТА" : "GLOBAL FEED"}
+    </button>
+
+    <div class="search-container" style="flex:1; max-width:520px;">
       <i class="fas fa-search"></i>
-      <input id="q" class="discovery-search-input" placeholder="Search channels…" />
+      <input class="discovery-search-input" id="channelSearch"
+        placeholder="${currentLang === "ru" ? "Поиск по частотам..." : "Search frequencies..."}" />
     </div>
-    <div id="grid" class="public-grid" style="margin-top:16px;"></div>
   `;
-  el.posts.appendChild(wrap);
+  el.posts.appendChild(header);
 
-  const q = wrap.querySelector("#q");
-  const grid = wrap.querySelector("#grid");
+  // Back -> global feed
+  header.querySelector(".back-btn")?.addEventListener("click", () => {
+    state.view = "global";
+    state.channelId = null;
+    render();
+  });
 
-  const draw = () => {
-    const s = (q.value || "").trim().toLowerCase();
+  // --- Grid container ---
+  const grid = document.createElement("div");
+  grid.className = "public-grid";
+  el.posts.appendChild(grid);
+
+  const input = header.querySelector("#channelSearch");
+
+  // Helpers
+  const RU = currentLang === "ru";
+
+  function subsLabel(n) {
+    // Просто "N ПОДПИСЧИКОВ" как на скрине
+    return RU ? `${n} ПОДПИСЧИКОВ` : `${n} SUBSCRIBERS`;
+  }
+
+  function lastSignalTitle(title) {
+    const t = String(title || "").trim();
+    if (!t) return RU ? "Сигналов не было" : "No signals";
+    return t;
+  }
+
+  function draw() {
+    const q = (input?.value || "").trim().toLowerCase();
     grid.innerHTML = "";
 
-    const list = state.channels.filter(c => !s || c.name.toLowerCase().includes(s));
+    const list = state.channels
+      .filter((c) => !q || String(c.name || "").toLowerCase().includes(q))
+      .sort((a, b) => (b.lastPostAt || "").localeCompare(a.lastPostAt || ""));
 
     if (!list.length) {
-      grid.innerHTML = `<div class="empty-state">Nothing found</div>`;
+      grid.innerHTML = `<div class="empty-state">${RU ? "НИЧЕГО НЕ НАЙДЕНО" : "NOTHING FOUND"}</div>`;
       return;
     }
 
@@ -471,45 +501,64 @@ function renderDiscovery(){
       const card = document.createElement("div");
       card.className = "public-card";
 
+      // подписка (у тебя пока локальная через state.subscriptions)
+      const isSub = state.subscriptions.has(c.id);
+
+      // количество подписчиков: если данных нет — покажем 0
+      // (если позже добавишь c.subscribers_count — оно начнёт показываться автоматически)
+      const subsCount =
+        Number(c.subscribers_count ?? c.subscribers ?? c.subs ?? 0) || 0;
+
       const avatar = c.avatar || fallbackAvatar(c.name);
 
       card.innerHTML = `
         <div class="public-card-header">
-          <img class="public-card-avatar" src="${escapeHtml(avatar)}" alt="">
+          <img class="public-card-avatar" src="${escapeAttr(avatar)}" alt="">
           <div class="public-card-info">
             <div class="public-card-name">
               ${escapeHtml(c.name)}
-              ${c.verified ? `<i class="fas fa-check-circle channel-verified"></i>` : ""}
+              ${
+                c.verified
+                  ? `<i class="fas fa-check-circle channel-verified" title="Verified"></i>`
+                  : ""
+              }
             </div>
-            <div class="public-card-subs">${c.count} posts</div>
+            <div class="public-card-subs">${escapeHtml(subsLabel(subsCount))}</div>
           </div>
         </div>
+
         <div class="public-card-last-post">
-          <span class="last-post-label">LAST SIGNAL</span>
-          <span class="last-post-title">${escapeHtml(c.lastTitle || "—")}</span>
+          <span class="last-post-label">${RU ? "ПОСЛЕДНЯЯ ПЕРЕДАЧА" : "LAST SIGNAL"}</span>
+          <span class="last-post-title">${escapeHtml(lastSignalTitle(c.lastTitle))}</span>
         </div>
-        <div style="display:flex; gap:10px;">
-          <button class="btn-secondary" data-open>OPEN</button>
-          ${c.id.startsWith("d_") ? `<button class="btn-secondary" data-sub>${isSubscribed(c.id) ? "UNSUB" : "SUB"}</button>` : ""}
-        </div>
+
+        <button class="subscribe-btn ${isSub ? "subscribed" : ""}" type="button"
+                style="width:100%; justify-content:center; margin-top:12px;">
+          <i class="fas ${isSub ? "fa-bell-slash" : "fa-bell"}"></i>
+          ${RU ? (isSub ? "ОТПИСАТЬСЯ" : "ПОДПИСАТЬСЯ") : (isSub ? "UNSUBSCRIBE" : "SUBSCRIBE")}
+        </button>
       `;
 
-      card.querySelector("[data-open]")?.addEventListener("click", () => {
+      // Кнопка подписки
+      card.querySelector(".subscribe-btn")?.addEventListener("click", (e) => {
+        e.preventDefault();
+        e.stopPropagation();
+        toggleSub(c.id); // твоя функция
+        draw();          // перерисовать только сетку
+      });
+
+      // Клик по карточке -> открыть канал
+      card.addEventListener("click", () => {
         state.view = "channel";
         state.channelId = c.id;
         render();
       });
 
-      card.querySelector("[data-sub]")?.addEventListener("click", () => {
-        toggleLocalSub(c.id);
-        draw();
-      });
-
       grid.appendChild(card);
     }
-  };
+  }
 
-  q.addEventListener("input", draw);
+  input?.addEventListener("input", draw);
   draw();
 }
 

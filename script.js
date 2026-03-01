@@ -1,4 +1,5 @@
 
+
 const CONFIG = {
   // Discord -> posts.json (рядом с index.html)
   POSTS_URL: "posts.json",
@@ -10,11 +11,11 @@ const CONFIG = {
   MAX_COMMENTS_RENDER: 120,
 
   // Supabase (опционально)
-  SUPABASE_ENABLED: true,
-  SUPABASE_URL: "",        // <-- вставь сюда
-  SUPABASE_ANON_KEY: "",   // <-- вставь сюда
-  SUPABASE_POSTS_TABLE: "posts",
-  SUPABASE_PUBLICS_TABLE: "publics",
+SUPABASE_ENABLED: true,
+SUPABASE_URL: "https://adzxwgaoozuoamqqwkcd.supabase.co",
+SUPABASE_ANON_KEY: "sb_publishable_MxwhklaWPh4uOnvl_WI4eg_ceEre8pi",
+SUPABASE_POSTS_TABLE: "posts",
+SUPABASE_PUBLICS_TABLE: "publics",
   ONLY_USER_POSTS: false,  // true = брать только is_user_post=true
 };
 
